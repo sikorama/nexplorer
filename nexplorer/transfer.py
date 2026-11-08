@@ -293,7 +293,7 @@ def _item_count(node: _Node) -> int:
     return 1 + sum(_item_count(c) for c in node.children)
 
 
-def _delete(job: _Job, folder: str, nodes: list[_Node]) -> None:
+def _delete(job: _Job, folder: str, nodes: list[_Node], counted: bool = True) -> None:
     for node in nodes:
         entry = node.entry
         job.check_cancel()
@@ -305,14 +305,15 @@ def _delete(job: _Job, folder: str, nodes: list[_Node]) -> None:
             if entry.is_dir:
                 if node.error:
                     raise node.error
-                _delete(job, path, node.children)
+                _delete(job, path, node.children, counted)
                 job.session.remove_dir(path, timeout=job.timeout)
             else:
                 job.session.remove_file(path, timeout=job.timeout)
         except (RemoteError, OSError) as exc:
             job.fail(path, str(exc))
-        job.finished(1)
-        job.report(entry.name)
+        if counted:
+            job.finished(1)
+            job.report(entry.name)
 
 
 def make_folder(session: Session, next_dir: str, name: str, timeout: float = 60) -> Result:
@@ -429,7 +430,7 @@ def _move_across(job: _Job, source: str, target: str, entry: Entry) -> None:
         job.fail(source, f"copy differs from the source ({found} against {expected}); source kept")
         return
     node = _scan(job, _parent(source), [entry])[0]
-    _delete(job, _parent(source), [node])
+    _delete(job, _parent(source), [node], counted=False)  # the caller counts one step per entry
 
 
 def _measure(job: _Job, path: str, entry: Entry) -> tuple[int, int]:

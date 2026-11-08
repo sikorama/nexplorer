@@ -105,6 +105,12 @@ class _Tree(QTreeWidget):
         mime.setData(NEXT_ENTRIES_MIME, "\n".join(i.text(0) for i in items).encode())
         return mime
 
+    def _carries_wanted(self, event) -> bool:
+        mime = event.mimeData()
+        return (self.accept_urls and mime.hasUrls()) or (
+            self.accept_next_entries and mime.hasFormat(NEXT_ENTRIES_MIME)
+        )
+
     def _wanted(self, event) -> bool:
         mime = event.mimeData()
         if self.accept_urls and mime.hasUrls():
@@ -114,7 +120,9 @@ class _Tree(QTreeWidget):
         return False
 
     def dragEnterEvent(self, event) -> None:
-        if self._wanted(event):
+        # Accepted wherever it lands: on X11 an ignored enter stops the moves, so the drag could
+        # not become valid until it left and came back. dragMoveEvent decides row by row.
+        if self._carries_wanted(event):
             event.acceptProposedAction()
         else:
             event.ignore()  # never the default internal move: rows are not reordered by hand

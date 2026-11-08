@@ -364,6 +364,31 @@ def test_dragging_next_entries_onto_a_file_row_or_empty_space_of_the_next_pane_d
     nxt.drop()
 
 
+def test_a_drag_entering_the_next_pane_over_a_file_row_is_not_cut_off(app, window):
+    """Qt on X11 stops sending moves after an ignored enter: the enter must be accepted
+    wherever it lands, and the folder rows decide on each move."""
+    from PySide6.QtCore import Qt
+    from PySide6.QtGui import QDragEnterEvent, QDragMoveEvent
+
+    w, listener = window
+    nxt = connect_next(app, w, listener)
+    pane = w.next_pane()
+    assert pump(app, lambda: "games" in pane.names())
+    pane.select(["readme.txt"])
+    mime, view = pane.drag_mime(), pane.list_view().viewport()
+
+    def send(kind, name):
+        event = kind(pane.row_center(name), Qt.MoveAction, mime, Qt.LeftButton, Qt.NoModifier)
+        event.setAccepted(False)
+        QApplication.sendEvent(view, event)
+        return event.isAccepted()
+
+    assert send(QDragEnterEvent, "readme.txt")
+    assert not send(QDragMoveEvent, "readme.txt")
+    assert send(QDragMoveEvent, "games")
+    nxt.drop()
+
+
 def test_dragging_next_entries_onto_a_next_folder_moves_them_into_it(app, window):
     w, listener = window
     nxt = connect_next(app, w, listener)

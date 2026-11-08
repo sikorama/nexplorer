@@ -533,6 +533,17 @@ def test_move_across_drives_copies_checks_the_size_then_deletes_the_source(liste
     nxt.drop()
 
 
+def test_cross_drive_move_progress_counts_one_step_per_entry(listener):
+    from nexplorer.transfer import move
+
+    nxt, session = _session_with(listener, fs=MOVE_FS)
+    seen = []
+    move(session, "c:/src", _entries(("game", True, 0), ("note.txt", False, 4)), "m:/dst",
+         progress=lambda name, percent: seen.append((name, percent)))
+    assert seen == [("game", 50), ("note.txt", 100)]
+    nxt.drop()
+
+
 def test_a_failing_cross_drive_move_keeps_the_source_and_says_so(listener):
     from nexplorer.transfer import move
 
