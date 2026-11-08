@@ -221,3 +221,23 @@ def test_free_space_of_an_unmeasurable_drive_fails(listener):
         session.free_space("M", timeout=2)
     nxt.drop()
 
+
+
+def test_list_dir_refuses_a_path_over_254_bytes_without_sending_it(listener):
+    longest_ok = "c:/" + "a" * 251  # 254 bytes
+    nxt, session = _session_with(listener, fs={longest_ok: None})
+    too_long = "c:/" + "a" * 252  # 255 bytes: the dot would truncate it silently
+    with pytest.raises(RemoteError):
+        session.list_dir(too_long, timeout=2)
+    assert nxt.listed == []
+    assert session.list_dir(longest_ok, timeout=2) == []  # 254 bytes still goes out
+    assert len(nxt.listed) == 1
+    nxt.drop()
+
+
+def test_list_dir_refuses_a_non_ascii_path_without_sending_it(listener):
+    nxt, session = _session_with(listener, fs={"c:/a": None})
+    with pytest.raises(RemoteError):
+        session.list_dir("c:/café", timeout=2)
+    assert nxt.listed == []
+    nxt.drop()

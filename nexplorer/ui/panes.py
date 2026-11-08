@@ -217,11 +217,16 @@ class NextBackend:
 
     def __init__(self):
         self.session: Session | None = None
+        self.allowed_drives: set[str] = set()  # upper-case letters reported by `W`
 
     def list(self, path: str) -> list[Entry]:
         session = self.session
         if session is None:
             raise ConnectionError(tr("No Next connected"))
+        # Any path on an unmounted or floppy drive crashes the dot: only the
+        # drives the Next reported are ever sent (docs/protocol.md, `W`).
+        if len(path) < 2 or path[1] != ":" or path[0].upper() not in self.allowed_drives:
+            raise PermissionError(tr("Drive not available on the Next"))
         return session.list_dir(path, timeout=60)
 
     def join(self, path: str, name: str) -> str:
@@ -273,6 +278,7 @@ class NextPane(FolderPane):
     def unbind(self) -> None:
         """The Session ended: forget everything about it."""
         self._next.session = None
+        self._next.allowed_drives = set()
         self._request += 1
         self._loading = False
         self._entries = []
@@ -319,6 +325,7 @@ class NextPane(FolderPane):
         if session is not self._next.session:
             return
         if drives is not None:
+            self._next.allowed_drives = {letter.upper() for letter in drives.letters}
             self._drives.clear()
             self._drives.addItems(drives.letters)
             self._drive = drives.current

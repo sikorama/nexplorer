@@ -150,7 +150,7 @@ class Session:
 
     def list_dir(self, path: str, timeout: float | None = None) -> list[Entry]:
         """The entries of a folder on the Next; RemoteError if it cannot be opened."""
-        blocks = self._call(b"L" + path.encode("ascii"), timeout, terminals=(b"E", b"F"))
+        blocks = self._call(b"L" + _wire_path(path), timeout, terminals=(b"E", b"F"))
         if blocks[-1][:1] == b"F":
             raise RemoteError(f"cannot list {path}")
         entries: list[Entry] = []
@@ -313,6 +313,20 @@ class _Call:
         self.error: Exception | None = None
         self.cancelled = False
         self.done = threading.Event()
+
+
+MAX_PATH = 254
+
+
+def _wire_path(path: str) -> bytes:
+    """A path as the dot takes it; refuse what it would silently truncate or garble."""
+    try:
+        raw = path.encode("ascii")
+    except UnicodeEncodeError:
+        raise RemoteError(f"path is not ASCII: {path!r}") from None
+    if len(raw) > MAX_PATH:
+        raise RemoteError(f"path over {MAX_PATH} bytes: {path[:40]!r}...")
+    return raw
 
 
 def _parse_entries(data: bytes) -> list[Entry]:

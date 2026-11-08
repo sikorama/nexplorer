@@ -137,3 +137,29 @@ def test_next_pane_goes_back_to_waiting_and_clears_when_the_session_ends(app, wi
     nxt2 = connect_next(app, w, listener)
     assert pump(app, lambda: w.next_pane().names() == ["games", "readme.txt"])
     nxt2.drop()
+
+
+@pytest.mark.parametrize("typed", ["a:/", "B:/games", "d:/", "d:/anything", "/games", "games"])
+def test_typed_path_on_a_drive_the_next_did_not_report_is_refused_and_never_sent(
+    app, window, typed
+):
+    w, listener = window
+    nxt = connect_next(app, w, listener)  # drives C and M only
+    pane = w.next_pane()
+    assert pump(app, lambda: pane.names() == ["games", "readme.txt"])
+    pane.go_to(typed)
+    assert pump(app, lambda: pane.error() != "")
+    assert pane.path() == "c:/"
+    pump(app, lambda: False, timeout=0.3)
+    assert nxt.listed == ["c:/"]  # only the first listing, from the bind
+    nxt.drop()
+
+
+def test_typed_path_on_a_reported_drive_is_sent_whatever_its_letter_case(app, window):
+    w, listener = window
+    nxt = connect_next(app, w, listener)
+    pane = w.next_pane()
+    assert pump(app, lambda: pane.drives() == ["C", "M"])
+    pane.go_to("M:/")
+    assert pump(app, lambda: pane.names() == ["tmp.bin"])
+    nxt.drop()

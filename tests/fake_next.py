@@ -54,6 +54,7 @@ class FakeNext:
         self.bad_header_total = bad_header_total
         self.drives, self.current_drive = drives, current_drive
         self.free_blocks = {k.upper(): v for k, v in (free_blocks or {}).items()}
+        self.listed: list[str] = []  # paths received by `L`, in order
         self.max_listing_block = 0  # largest `D` listing block sent, in bytes
         self.fs = {k.lower(): v for k, v in (fs or {}).items()}
         self.sock: socket.socket | None = None
@@ -173,6 +174,7 @@ class FakeNext:
             self.resends += 1
 
     def _list(self, path: str) -> None:
+        self.listed.append(path)
         folder = path.lower().rstrip("/")
         is_root = len(folder) == 2 and folder[1] == ":"
         if not is_root and self.fs.get(folder, b"") is not None:
