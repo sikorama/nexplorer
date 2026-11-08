@@ -28,6 +28,7 @@ def _states() -> dict[str, str]:
         "different": tr("Different"),
         "unverified": tr("Unverified"),
         "identical": tr("Identical"),
+        "not-scanned": tr("Not scanned"),
         "conflict": tr("Conflict"),
         "invalid": tr("Invalid"),
         "ignored": tr("Ignored"),
@@ -46,6 +47,8 @@ class CompareView(QWidget):
     apply_requested = Signal()
     verify_requested = Signal()
     back_requested = Signal()
+    expand_requested = Signal(str)
+    scan_all_requested = Signal()
 
     def __init__(self):
         super().__init__()
@@ -53,13 +56,15 @@ class CompareView(QWidget):
         self._title = QLabel()
         self._title.setTextFormat(Qt.PlainText)
         self._tree = QTreeWidget()
-        self._tree.setRootIsDecorated(False)
+        self._tree.itemExpanded.connect(self._on_item_expanded)
         self._tree.setHeaderLabels(["", tr("Name"), tr("Local"), tr("Direction"), tr("Next"), tr("State")])
         self._tree.itemChanged.connect(self._on_item_changed)
         self._reverse = QPushButton(tr("Reverse direction"))
         self._reverse.clicked.connect(self._reverse_selected)
         self._one = QPushButton(tr("Transfer this file"))
         self._one.clicked.connect(lambda: self._with_selected(self.transfer_requested.emit))
+        self._scan_all = QPushButton(tr("Scan all"))
+        self._scan_all.clicked.connect(self.scan_all_requested)
         self._verify = QPushButton(tr("Verify"))
         self._verify.clicked.connect(self.verify_requested)
         self._apply = QPushButton(tr("Apply"))
@@ -67,7 +72,7 @@ class CompareView(QWidget):
         self._back = QPushButton(tr("Back to the panes"))
         self._back.clicked.connect(self.back_requested)
         buttons = QHBoxLayout()
-        for b in (self._reverse, self._one, self._verify, self._apply):
+        for b in (self._reverse, self._one, self._scan_all, self._verify, self._apply):
             buttons.addWidget(b)
         buttons.addStretch(1)
         buttons.addWidget(self._back)
@@ -85,20 +90,47 @@ class CompareView(QWidget):
         self._fill()
 
     def _fill(self) -> None:
-        states = _states()
         self._tree.blockSignals(True)
+        expanded = self._expanded_paths()
         self._tree.clear()
-        for r in self._rows:
+        self._add_rows(self._tree.invisibleRootItem(), self._rows, "", expanded)
+        self._tree.blockSignals(False)
+
+    def _expanded_paths(self) -> set[str]:
+        found = set()
+        stack = [self._tree.topLevelItem(i) for i in range(self._tree.topLevelItemCount())]
+        while stack:
+            item = stack.pop()
+            if item.isExpanded():
+                found.add(item.data(1, Qt.UserRole))
+            stack += [item.child(i) for i in range(item.childCount())]
+        return found
+
+    def _add_rows(self, parent, rows: list[Row], prefix: str, expanded: set[str]) -> None:
+        states = _states()
+        for r in rows:
+            path = prefix + r.name
             item = QTreeWidgetItem(
                 ["", r.name, _size(r.local), _ARROWS[r.direction], _size(r.remote), states[r.state]]
             )
+            item.setData(1, Qt.UserRole, path)
             if r.state in BLOCKED:
                 self._mark_blocked(item, r.state)
             else:
                 item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
                 item.setCheckState(0, Qt.Checked if r.checked else Qt.Unchecked)
-            self._tree.addTopLevelItem(item)
-        self._tree.blockSignals(False)
+            parent.addChild(item)
+            if r.state == "not-scanned" and r.children is None:
+                item.setChildIndicatorPolicy(QTreeWidgetItem.ShowIndicator)
+            if r.children is not None:
+                self._add_rows(item, r.children, path + "/", expanded)
+                item.setExpanded(path in expanded)
+
+    def _on_item_expanded(self, item: QTreeWidgetItem) -> None:
+        path = item.data(1, Qt.UserRole)
+        row = self.row(path)
+        if row.children is None and row.state == "not-scanned":
+            self.expand_requested.emit(path)
 
     def _mark_blocked(self, item: QTreeWidgetItem, state: str) -> None:
         """Greyed rows the user cannot check; an invalid one also gets an error icon."""
@@ -112,17 +144,25 @@ class CompareView(QWidget):
         return {r.name: self._tree.topLevelItem(i).text(5) for i, r in enumerate(self._rows)}
 
     def _on_item_changed(self, item: QTreeWidgetItem, _column: int) -> None:
-        self.row(item.text(1)).checked = item.checkState(0) == Qt.Checked
+        self.row(item.data(1, Qt.UserRole)).checked = item.checkState(0) == Qt.Checked
 
     def _with_selected(self, action) -> None:
         for item in self._tree.selectedItems():
-            action(item.text(1))
+            action(item.data(1, Qt.UserRole))
 
     def _reverse_selected(self) -> None:
         self._with_selected(self.reverse)
 
-    def row(self, name: str) -> Row:
-        return next(r for r in self._rows if r.name == name)
+    def row(self, path: str) -> Row:
+        """A row by its name, or by its path ("games/deep") below an expanded folder."""
+        rows, found = self._rows, None
+        for part in path.split("/"):
+            found = next(r for r in rows if r.name == part)
+            rows = found.children or []
+        return found
+
+    def refresh(self) -> None:
+        self._fill()
 
     def rows(self) -> list[Row]:
         return self._rows

@@ -21,11 +21,12 @@ BLOCKED = frozenset({"conflict", "invalid", "ignored", "hidden"})
 @dataclass
 class Row:
     name: str
-    state: str  # "only-local", "only-next", "different", "unverified", "identical" or a blocked state
+    state: str  # "only-local", "only-next", "different", "unverified", "identical" "not-scanned" or a blocked state
     direction: str | None  # "to-next", "to-local" or None
     checked: bool
     local: Entry | None = None
     remote: Entry | None = None
+    children: list["Row"] | None = None  # the next level of a folder on both sides, once scanned
 
     def reverse(self) -> None:
         """Flip the direction; a row without one starts as Local to Next."""
@@ -96,6 +97,8 @@ def compare_level(
             rows.append(Row(e.name, blocked, None, False, e, other))
         elif other is None:
             rows.append(Row(e.name, "only-local", "to-next", True, e, None))
+        elif e.is_dir and other.is_dir:
+            rows.append(Row(e.name, "not-scanned", None, False, e, other))
         elif other.size != e.size:
             rows.append(Row(e.name, "different", None, False, e, other))
         else:
@@ -106,6 +109,93 @@ def compare_level(
         blocked = _blocked(e.name, next_dir, ignore, show_hidden)
         rows.append(Row(e.name, blocked or "only-next", None if blocked else "to-local", not blocked, None, e))
     return rows
+
+
+def _join_next(folder: str, name: str) -> str:
+    return folder.rstrip("/") + "/" + name
+
+
+def _list_local(path: str) -> list[Entry]:
+    entries = []
+    with os.scandir(path) as it:
+        for e in it:
+            is_dir = e.is_dir()
+            entries.append(Entry(e.name, is_dir, 0 if is_dir else e.stat().st_size))
+    return entries
+
+
+def settle(row: Row) -> None:
+    """A folder is identical only when everything below it was scanned and is identical."""
+    if row.children is None:
+        return
+    for c in row.children:
+        settle(c)
+    states = {c.state for c in row.children}
+    if "not-scanned" in states:
+        row.state = "not-scanned"
+    elif states <= {"identical"}:
+        row.state = "identical"
+    elif states <= {"identical", "unverified"}:
+        row.state = "unverified"
+    else:
+        row.state = "different"
+
+
+def expand(
+    session: Session,
+    row: Row,
+    local_dir: str,
+    next_dir: str,
+    show_hidden: bool = True,
+    ignore: list[str] = (),
+) -> None:
+    """List the next level of a folder present on both sides (Local, then the Next), under the naming rules.
+
+    The Local folder's patterns apply to every level; a subfolder's own ignore file is not read."""
+    child_next = _join_next(next_dir, row.name)
+    row.children = compare_level(
+        _list_local(os.path.join(local_dir, row.name)), session.list_dir(child_next), child_next, ignore, show_hidden
+    )
+    settle(row)
+
+
+def scan_all(
+    session: Session,
+    rows: list[Row],
+    local_dir: str,
+    next_dir: str,
+    progress: Progress | None = None,
+    cancel: Callable[[], bool] | None = None,
+    show_hidden: bool = True,
+    ignore: list[str] = (),
+) -> Result:
+    """Expand every not scanned folder below `rows`; Cancel leaves the unreached ones not scanned."""
+    result = Result()
+    pending = [(r, local_dir, next_dir) for r in rows]
+    done = 0
+    while pending:
+        r, ldir, ndir = pending.pop(0)
+        if r.state == "not-scanned" and r.children is None:
+            if cancel and cancel():
+                result.cancelled = True
+                break
+            if progress:
+                progress(r.name, 100 * done // (done + len(pending) + 1))
+            try:
+                expand(session, r, ldir, ndir, show_hidden, ignore)
+            except (ConnectionError, TimeoutError):
+                result.dropped = True
+                result.failures.append(Failure(r.name, "session lost"))
+                break
+            except (OSError, RemoteError) as exc:
+                result.failures.append(Failure(r.name, f"cannot list the folder: {exc}"))
+                continue
+            done += 1
+        if r.children is not None:
+            pending += [(c, os.path.join(ldir, r.name), _join_next(ndir, r.name)) for c in r.children]
+    for r in rows:
+        settle(r)
+    return result
 
 
 def apply(
@@ -122,6 +212,16 @@ def apply(
     Stops when the user cancels or the Session is lost."""
     total = Result()
     for r in rows:
+        if r.children is not None:
+            sub = apply(
+                session, os.path.join(local_dir, r.name), _join_next(next_dir, r.name),
+                r.children, progress, cancel, verify_crc,
+            )
+            total.failures += sub.failures
+            if sub.cancelled or sub.dropped:
+                total.cancelled, total.dropped = sub.cancelled, sub.dropped
+                break
+            continue
         if not r.transferable():
             continue
         if cancel and cancel():

@@ -151,6 +151,11 @@ def test_a_reversed_one_sided_row_has_no_source_so_nothing_moves_and_nothing_is_
     nxt.drop()
 
 
+def test_a_folder_on_both_sides_is_not_scanned_and_has_nothing_to_transfer():
+    r = row(compare_level([Entry("games", True, 0)], [Entry("games", True, 0)]), "games")
+    assert (r.state, r.direction, r.checked, r.children) == ("not-scanned", None, False, None)
+
+
 def test_names_match_without_regard_to_case():
     rows = compare_level([Entry("Foo.TXT", False, 10)], [Entry("foo.txt", False, 10)])
     assert [(r.name, r.state) for r in rows] == [("Foo.TXT", "unverified")]

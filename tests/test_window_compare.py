@@ -74,6 +74,42 @@ def test_apply_transfers_the_checked_rows_and_a_single_row_can_go_alone(app, tmp
         nxt.drop()
 
 
+def nested_local(tmp_path):
+    path = local_folder(tmp_path)
+    games = tmp_path / "local" / "games"
+    games.mkdir()
+    (games / "a.tap").write_bytes(b"aa")
+    (games / "deep").mkdir()
+    (games / "deep" / "z.tap").write_bytes(b"z")
+    return path
+
+
+TREE_FS = {
+    **NEXT_FS,
+    "c:/dest/games": None,
+    "c:/dest/games/a.tap": b"aa",
+    "c:/dest/games/deep": None,
+    "c:/dest/games/deep/z.tap": b"zz",
+}
+
+
+def test_a_folder_on_both_sides_is_not_scanned_until_expanded(app, tmp_path):
+    path = nested_local(tmp_path)
+    with opened(app, path) as (w, listener):
+        nxt = prepare(app, w, listener, tmp_path, TREE_FS)
+        w.compare()
+        assert ("games", "not-scanned", "", False) in w.compare_rows()
+        w.compare_expand("games")
+        assert pump(app, lambda: not w.operation_running(), timeout=10)
+        states = dict(w.compare_states())
+        assert sorted(states) == [
+            "clash.tap", "down.tap", "games", "games/a.tap", "games/deep", "same.tap", "up.tap",
+        ]
+        assert states["games/a.tap"] == "unverified"
+        assert states["games/deep"] == "not-scanned" and states["games"] == "not-scanned"
+        nxt.drop()
+
+
 def naming_folder(tmp_path, show_hidden):
     folder = tmp_path / "local"
     folder.mkdir()
