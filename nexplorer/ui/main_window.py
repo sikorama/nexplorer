@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import os
 import threading
+from dataclasses import replace
 from pathlib import Path
 from typing import Callable
 
@@ -28,7 +29,7 @@ from PySide6.QtWidgets import (
 
 from nexplorer import settings as settings_store
 from nexplorer.i18n import available_languages, set_language, tr
-from nexplorer.compare import Row, apply as apply_rows, compare_level
+from nexplorer.compare import Row, apply as apply_rows, compare_level, expand as expand_row, scan_all
 from nexplorer.protocol import Listener
 from nexplorer.transfer import Result, copy, is_plain_name, make_folder, move, receive, remove, rename, send
 from nexplorer.settings import Settings
@@ -56,7 +57,7 @@ def local_ipv4_addresses() -> list[tuple[str, str]]:
 
 def _one_row(row):
     """The row as if it were checked: a single transfer ignores the checkbox."""
-    return Row(row.name, row.state, row.direction, True, row.local, row.remote)
+    return replace(row, checked=True)
 
 
 def _ask_name_dialog(title: str, initial: str = "") -> str | None:
@@ -242,6 +243,8 @@ class MainWindow(QMainWindow):
         self._compare_view.transfer_requested.connect(self.compare_transfer)
         self._compare_view.apply_requested.connect(self.compare_apply)
         self._compare_view.back_requested.connect(self.compare_back)
+        self._compare_view.expand_requested.connect(self.compare_expand)
+        self._compare_view.scan_all_requested.connect(self.compare_scan_all)
         self._next_pane.files_dropped.connect(self.drop_files)
         self._local_pane.next_entries_dropped.connect(lambda names, _row: self.drop_next_entries(names))
         self._next_pane.entries_moved.connect(self.move_dropped)
@@ -433,6 +436,44 @@ class MainWindow(QMainWindow):
                 )
             )
 
+    def compare_expand(self, path: str) -> None:
+        """List the next level of a not scanned folder, given as a path from the compared folders."""
+        session = self._next_pane.session()
+        local_dir, next_dir = self._local_pane.path(), self._next_pane.path()
+        if not session or not local_dir or not next_dir or self._busy:
+            return
+        *parents, _ = path.split("/")
+        row = self._compare_view.row(path)
+        local_dir, next_dir = os.path.join(local_dir, *parents), "/".join([next_dir.rstrip("/"), *parents])
+        hidden = self._settings.show_hidden
+
+        def work(progress, cancel):
+            expand_row(session, row, local_dir, next_dir, hidden)
+            return Result()
+
+        self._run(work)
+
+    def compare_scan_all(self) -> None:
+        """Expand the whole tree, with progress; Cancel leaves the unreached folders not scanned."""
+        session = self._next_pane.session()
+        local_dir, next_dir = self._local_pane.path(), self._next_pane.path()
+        if not session or not local_dir or not next_dir or self._busy:
+            return
+        rows, hidden = self._compare_view.rows(), self._settings.show_hidden
+        self._run(lambda progress, cancel: scan_all(session, rows, local_dir, next_dir, progress, cancel, hidden))
+
+    def compare_states(self) -> list[tuple[str, str]]:
+        """(path, state) of every row shown, nested ones included."""
+        found: list[tuple[str, str]] = []
+
+        def walk(rows, prefix):
+            for r in rows:
+                found.append((prefix + r.name, r.state))
+                walk(r.children or [], prefix + r.name + "/")
+
+        walk(self._compare_view.rows(), "")
+        return found
+
     def compare_reverse(self, name: str) -> None:
         self._compare_view.reverse(name)
 
@@ -523,6 +564,7 @@ class MainWindow(QMainWindow):
             self._summary.setText(f"{tr('Failed')}: {outcome}")
         self._next_pane.reload()
         self._local_pane.reload()
+        self._compare_view.refresh()
         self._update_actions()
 
     def _update_actions(self) -> None:

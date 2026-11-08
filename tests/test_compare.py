@@ -123,3 +123,8 @@ def test_a_reversed_one_sided_row_has_no_source_so_nothing_moves_and_nothing_is_
     assert (tmp_path / "only.tap").read_bytes() == b"only"
     assert set(nxt.fs) == {"d:/dest"}
     nxt.drop()
+
+
+def test_a_folder_on_both_sides_is_not_scanned_and_has_nothing_to_transfer():
+    r = row(compare_level([Entry("games", True, 0)], [Entry("games", True, 0)]), "games")
+    assert (r.state, r.direction, r.checked, r.children) == ("not-scanned", None, False, None)
