@@ -114,6 +114,10 @@ class FolderPane(QWidget):
     def go_to(self, path: str) -> None:
         self.load(path)
 
+    def reload(self) -> None:
+        if self._path:
+            self.load(self._path)
+
     def go_up(self) -> None:
         self.load(self._backend.parent(self._path))
 
@@ -163,6 +167,10 @@ class FolderPane(QWidget):
             for i in range(self._tree.topLevelItemCount())
             if self._tree.topLevelItem(i).isSelected()
         ]
+
+    def selected_entries(self) -> list[Entry]:
+        names = set(self.selected_names())
+        return [e for e in self._entries if e.name in names]
 
     def _on_loaded(self, request: int, path: str, entries: list, error: str) -> None:
         if request != self._request:
@@ -230,6 +238,10 @@ class NextBackend:
         return session.list_dir(path, timeout=60)
 
     def join(self, path: str, name: str) -> str:
+        if name == "..":
+            return self.parent(path)
+        if name == ".":
+            return path
         return path.rstrip("/") + "/" + name
 
     def parent(self, path: str) -> str:
@@ -334,6 +346,9 @@ class NextPane(FolderPane):
         elif self._drive and self._drives.currentText() != self._drive:
             return
         self._free.setText(free)
+
+    def session(self) -> Session | None:
+        return self._next.session
 
     # -- observation points for tests
     def drives(self) -> list[str]:

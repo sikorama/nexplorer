@@ -36,6 +36,13 @@ class FakeNext:
         drives: str = "CM",
         current_drive: str = "C",
         free_blocks: dict[str, int] | None = None,
+        truncate_puts_to: int | None = None,
+        truncated_put_reports_failure: bool = True,
+        put_retry_chunks: frozenset[int] = frozenset(),
+        put_restart_at_chunk: int | None = None,
+        put_chunk_delay: float = 0.0,
+        put_stalls_at_chunk: int | None = None,
+        get_drops_after_blocks: int | None = None,
     ):
         """`ignores`: opcodes an older dot does not know (silently ignored).
         `drops_on`: opcodes on which the link dies mid-command.
@@ -45,7 +52,16 @@ class FakeNext:
         header announcing that total length instead of a real reply.
         `fs`: the Next's files, full path (lower case, drive-prefixed) to its
         content, or to None for a folder. `drives`, `current_drive`: what `W` answers. `free_blocks`: free
-        512-byte blocks per drive letter for `Z` (others answer `F`). `commands`: opcodes received, in order (idle `I` excluded)."""
+        512-byte blocks per drive letter for `Z` (others answer `F`). `truncate_puts_to`: a put keeps only that many bytes; the Next then gives up
+        and pushes `F` (the partial file stays), or, when
+        `truncated_put_reports_failure` is False, pretends to succeed (a silent
+        short write that only a size check can notice). `put_retry_chunks`: indexes of put chunks the Next claims arrived with a bad
+        checksum (it sends `Retry` once for each). `put_restart_at_chunk`: the
+        Next claims a packetno mismatch at that chunk index (it sends `Restart`
+        once and starts the file again). `put_chunk_delay`: seconds the Next takes
+        before asking for each put chunk. `put_stalls_at_chunk`: the Next stops
+        answering a put at that chunk index (until `drop`). `get_drops_after_blocks`: the link dies after that many `D`
+        blocks of a get. `commands`: opcodes received, in order (idle `I` excluded)."""
         self.host, self.port, self.version = host, port, version
         self.ignores, self.drops_on, self.poll_interval = ignores, drops_on, poll_interval
         self.commands: list[bytes] = []
@@ -54,6 +70,13 @@ class FakeNext:
         self.bad_header_total = bad_header_total
         self.drives, self.current_drive = drives, current_drive
         self.free_blocks = {k.upper(): v for k, v in (free_blocks or {}).items()}
+        self.truncate_puts_to = truncate_puts_to
+        self.truncated_put_reports_failure = truncated_put_reports_failure
+        self.put_retry_chunks = set(put_retry_chunks)
+        self.put_restart_at_chunk = put_restart_at_chunk
+        self.put_chunk_delay, self.put_stalls_at_chunk = put_chunk_delay, put_stalls_at_chunk
+        self.get_drops_after_blocks = get_drops_after_blocks
+        self.retries_sent = 0
         self.listed: list[str] = []  # paths received by `L`, in order
         self.max_listing_block = 0  # largest `D` listing block sent, in bytes
         self.fs = {k.lower(): v for k, v in (fs or {}).items()}
@@ -154,6 +177,12 @@ class FakeNext:
                         self._push_status(b"O" + self.free_blocks[drive].to_bytes(4, "little"))
                     else:
                         self._push_status(b"F")
+                elif op == b"G":
+                    self._get(arg.decode("ascii"))
+                elif op == b"M":
+                    self._mkdir(arg.decode("ascii"))
+                elif op == b"P":
+                    self._put(arg.decode("ascii"))
                 elif op == b"Q":
                     self.sock.close()
                     self.ended.set()
@@ -161,9 +190,9 @@ class FakeNext:
         except (ConnectionError, OSError, AssertionError):
             self.ended.set()
 
-    def _push_status(self, payload: bytes) -> None:
+    def _push_status(self, payload: bytes, no: int = 0) -> None:
         while True:
-            data = frame(payload, 0)
+            data = frame(payload, no)
             if self.corrupt_replies > 0:
                 self.corrupt_replies -= 1
                 data = data[:-3] + bytes([data[-3] ^ 0xFF]) + data[-2:]
@@ -199,3 +228,75 @@ class FakeNext:
             self.max_listing_block = max(self.max_listing_block, len(block))
             self._push_status(block)
         self._push_status(b"E")
+
+    def _put(self, path: str) -> None:
+        """The Next creates the file, then pulls it chunk by chunk with `Get`."""
+        key = path.lower()
+        self.fs[key] = b""
+        counter = index = 0
+        while True:
+            time.sleep(self.put_chunk_delay)
+            if index == self.put_stalls_at_chunk:
+                while not self._stop:
+                    time.sleep(0.01)
+                return
+            self.sock.sendall(b"Get")
+            payload, no = self._recv_frame()
+            assert no == counter, "unexpected packetno from Listener"
+            if index in self.put_retry_chunks:
+                self.put_retry_chunks.discard(index)
+                self.retries_sent += 1
+                self.sock.sendall(b"Retry")
+                again, again_no = self._recv_frame()
+                assert (again, again_no) == (payload, no), "Retry must resend the same chunk"
+            if index == self.put_restart_at_chunk:
+                self.put_restart_at_chunk = None
+                self.sock.sendall(b"Restart")
+                back, _ = self._recv_frame()
+                assert back == b"Back"
+                self.fs[key] = b""
+                counter = index = 0
+                continue
+            if not payload:  # the empty frame ends the file
+                return
+            limit = self.truncate_puts_to
+            if limit is not None and len(self.fs[key]) + len(payload) > limit:
+                self.fs[key] += payload[: limit - len(self.fs[key])]
+                if self.truncated_put_reports_failure:
+                    self._push_status(b"F")  # the Next gives up, file left partial
+                    return
+                counter = (counter + 1) & 0xFF
+                index += 1
+                continue
+            self.fs[key] += payload
+            counter = (counter + 1) & 0xFF
+            index += 1
+
+    def _get(self, path: str) -> None:
+        """Stream a file as `N`, `D`..., `E`, then `B`; a missing path gives a lone `B`."""
+        content = self.fs.get(path.lower())
+        no = 0
+        if content is not None:
+            name = path.rsplit("/", 1)[-1].encode("ascii")
+            self._push_status(b"N" + bytes(4) + bytes([len(name)]) + name, no)
+            no += 1
+            for n, i in enumerate(range(0, len(content), 1024)):
+                if n == self.get_drops_after_blocks:
+                    self.sock.close()
+                    self.ended.set()
+                    raise ConnectionError("dropped mid-get")
+                self._push_status(b"D" + content[i : i + 1024], no)
+                no += 1
+            self._push_status(b"E", no)
+            no += 1
+        self._push_status(b"B", no)
+
+    def _mkdir(self, path: str) -> None:
+        key = path.lower().rstrip("/")
+        parent = key.rpartition("/")[0]
+        parent_ok = (len(parent) == 2 and parent[1] == ":") or self.fs.get(parent, b"") is None
+        if key in self.fs or not parent_ok:  # esxDOS: the same error for "exists" and others
+            self._push_status(b"F")
+            return
+        self.fs[key] = None
+        self._push_status(b"O")

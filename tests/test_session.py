@@ -241,3 +241,182 @@ def test_list_dir_refuses_a_non_ascii_path_without_sending_it(listener):
         session.list_dir("c:/café", timeout=2)
     assert nxt.listed == []
     nxt.drop()
+
+
+def test_put_file_stores_the_content_on_the_next(listener, tmp_path):
+    local = tmp_path / "game.tap"
+    content = bytes(range(256)) * 5  # 1280 bytes: several 512-byte chunks, packetno wraps nowhere
+    local.write_bytes(content)
+    nxt, session = _session_with(listener, drives="CDM", fs={"d:/games": None})
+    session.put_file(str(local), "d:/games/game.tap", timeout=5)
+    assert nxt.fs["d:/games/game.tap"] == content
+    nxt.drop()
+
+
+def test_failed_put_raises_leaves_the_partial_file_and_the_session_stays_usable(listener, tmp_path):
+    local = tmp_path / "big.bin"
+    local.write_bytes(b"x" * 2000)
+    nxt, session = _session_with(listener, drives="CDM", truncate_puts_to=600)
+    with pytest.raises(RemoteError):
+        session.put_file(str(local), "d:/big.bin", timeout=5)
+    assert nxt.fs["d:/big.bin"] == b"x" * 600  # nothing is deleted on the Next
+    assert session.dot_version(timeout=2) == "5.9.14"
+    nxt.drop()
+
+
+def test_get_file_writes_the_content_of_the_next_file_locally(listener, tmp_path):
+    content = bytes(range(256)) * 9  # 2304 bytes: several D blocks
+    nxt, session = _session_with(listener, drives="CDM", fs={"d:/games/game.tap": content})
+    target = tmp_path / "copy.tap"
+    session.get_file("d:/games/game.tap", str(target), timeout=5)
+    assert target.read_bytes() == content
+    nxt.drop()
+
+
+def test_get_file_of_a_missing_path_fails_and_writes_nothing(listener, tmp_path):
+    nxt, session = _session_with(listener, drives="CDM", fs={"d:/a.txt": b"1"})
+    target = tmp_path / "x.txt"
+    with pytest.raises(RemoteError):
+        session.get_file("d:/nope.txt", str(target), timeout=5)
+    assert not target.exists()
+    assert session.dot_version(timeout=2) == "5.9.14"
+    nxt.drop()
+
+
+def test_put_survives_a_chunk_the_next_asks_to_have_resent(listener, tmp_path):
+    local = tmp_path / "a.bin"
+    content = bytes(range(256)) * 6
+    local.write_bytes(content)
+    nxt, session = _session_with(listener, drives="CDM", put_retry_chunks=frozenset({1}))
+    session.put_file(str(local), "d:/a.bin", timeout=5)
+    assert nxt.fs["d:/a.bin"] == content
+    assert nxt.retries_sent == 1
+    nxt.drop()
+
+
+def test_put_survives_a_restart_asked_by_the_next(listener, tmp_path):
+    local = tmp_path / "a.bin"
+    content = bytes(range(256)) * 6
+    local.write_bytes(content)
+    nxt, session = _session_with(listener, drives="CDM", put_restart_at_chunk=2)
+    session.put_file(str(local), "d:/a.bin", timeout=5)
+    assert nxt.fs["d:/a.bin"] == content
+    nxt.drop()
+
+
+def test_a_put_slower_than_the_timeout_succeeds_while_it_keeps_progressing(listener, tmp_path):
+    local = tmp_path / "slow.bin"
+    content = b"s" * (512 * 8)
+    local.write_bytes(content)
+    nxt, session = _session_with(listener, drives="CDM", put_chunk_delay=0.1)  # ~1 s in all
+    session.put_file(str(local), "d:/slow.bin", timeout=0.4)
+    assert nxt.fs["d:/slow.bin"] == content
+    nxt.drop()
+
+
+def test_a_put_that_stalls_times_out_and_ends_the_session_instead_of_leaving_it_serving(listener, tmp_path):
+    local = tmp_path / "stuck.bin"
+    local.write_bytes(b"x" * 2000)
+    nxt, session = _session_with(listener, drives="CDM", put_stalls_at_chunk=2)
+    with pytest.raises(TimeoutError):
+        session.put_file(str(local), "d:/stuck.bin", timeout=0.3)
+    assert session.wait_closed(timeout=2)  # out of step with the Next: nothing may go on
+    with pytest.raises(ConnectionError):
+        session.dot_version(timeout=1)
+    nxt.drop()
+
+
+@pytest.mark.parametrize("hook", ["progress", "cancel"])
+def test_a_failing_put_callback_reaches_the_caller_at_once_and_the_session_stays_usable(listener, tmp_path, hook):
+    local = tmp_path / "a.bin"
+    local.write_bytes(b"x" * 2000)
+    nxt, session = _session_with(listener, drives="CDM")
+
+    def boom(*_):
+        raise ValueError("callback broke")
+
+    started = time.monotonic()
+    with pytest.raises(ValueError, match="callback broke"):
+        session.put_file(str(local), "d:/a.bin", timeout=5, **{hook: boom})
+    assert time.monotonic() - started < 2  # not the full timeout
+    assert session.dot_version(timeout=2) == "5.9.14"
+    nxt.drop()
+
+
+def test_a_get_cut_short_leaves_no_partial_file_and_keeps_the_previous_one(listener, tmp_path):
+    nxt, session = _session_with(
+        listener, drives="CDM", fs={"d:/big.bin": b"n" * 4000}, get_drops_after_blocks=2
+    )
+    target = tmp_path / "big.bin"
+    target.write_bytes(b"old content")
+    with pytest.raises(ConnectionError):
+        session.get_file("d:/big.bin", str(target), timeout=5)
+    assert target.read_bytes() == b"old content"
+    assert [p.name for p in tmp_path.iterdir()] == ["big.bin"]  # no partial file either
+
+
+def test_the_wire_trace_records_what_is_sent_and_received_when_asked(listener, tmp_path, monkeypatch):
+    trace = tmp_path / "wire.log"
+    monkeypatch.setenv("NEXPLORER_TRACE", str(trace))
+    nxt, session = _session_with(listener, drives="CDM")
+    assert session.dot_version(timeout=2) == "5.9.14"
+    nxt.drop()
+    session.wait_closed(timeout=2)
+    lines = trace.read_text().splitlines()
+    assert any(l.endswith(" rx 1 50") for l in lines)  # the "P" of a Poll
+    assert any(" tx " in l for l in lines)
+    assert any(" end " in l for l in lines)  # the Session ended: when, and how
+
+
+def test_without_the_trace_variable_nothing_is_written(listener, tmp_path, monkeypatch):
+    monkeypatch.delenv("NEXPLORER_TRACE", raising=False)
+    monkeypatch.chdir(tmp_path)
+    nxt, session = _session_with(listener, drives="CDM")
+    session.dot_version(timeout=2)
+    nxt.drop()
+    assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.parametrize("path", ["d:/Download/../Download/a.bin", "d:/./a.bin", "d:/x/.."])
+def test_a_path_with_a_dot_or_dotdot_component_is_refused_without_being_sent(listener, tmp_path, path):
+    local = tmp_path / "a.bin"
+    local.write_bytes(b"x")
+    nxt, session = _session_with(listener, drives="CDM", fs={"d:/Download": None})
+    with pytest.raises(RemoteError):
+        session.put_file(str(local), path, timeout=2)
+    with pytest.raises(RemoteError):
+        session.list_dir(path, timeout=2)
+    time.sleep(0.1)
+    assert b"P" not in nxt.commands and b"L" not in nxt.commands
+    nxt.drop()
+
+
+def test_get_file_reports_the_bytes_received_so_far(listener, tmp_path):
+    content = bytes(range(256)) * 9  # 2304 bytes: three D blocks of up to 1024
+    nxt, session = _session_with(listener, drives="CDM", fs={"d:/a.bin": content})
+    seen = []
+    session.get_file("d:/a.bin", str(tmp_path / "a.bin"), timeout=5, progress=seen.append)
+    assert seen == [1024, 2048, 2304]
+    assert (tmp_path / "a.bin").read_bytes() == content
+    nxt.drop()
+
+
+def test_list_dir_never_returns_dot_and_dotdot_entries(listener):
+    nxt, session = _session_with(
+        listener,
+        drives="CDM",
+        fs={"d:/dl": None, "d:/dl/.": None, "d:/dl/..": None, "d:/dl/a.tap": b"1"},
+    )
+    assert [e.name for e in session.list_dir("d:/dl", timeout=2)] == ["a.tap"]
+    nxt.drop()
+
+
+def test_ending_the_session_makes_the_next_leave_and_waits_for_it(listener):
+    nxt, session = _session_with(listener, drives="CDM")
+    assert listener.end_session(timeout=3) is True
+    assert nxt.ended.wait(timeout=2)
+    assert listener.current_session is None
+
+
+def test_ending_the_session_without_one_returns_at_once(listener):
+    assert listener.end_session(timeout=3) is True

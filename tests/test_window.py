@@ -163,3 +163,46 @@ def test_typed_path_on_a_reported_drive_is_sent_whatever_its_letter_case(app, wi
     pane.go_to("M:/")
     assert pump(app, lambda: pane.names() == ["tmp.bin"])
     nxt.drop()
+
+
+def test_cancel_greys_its_button_and_says_it_is_cancelling(app, window, tmp_path):
+    w, listener = window
+    (tmp_path / "a.bin").write_bytes(b"a" * 512 * 12)
+    (tmp_path / "b.bin").write_bytes(b"b" * 10)
+    nxt = connect_next(app, w, listener, put_chunk_delay=0.05)  # about 0.6 s for a.bin
+    assert pump(app, lambda: "games" in w.next_pane().names())
+    w.local_pane().go_to(str(tmp_path))
+    assert pump(app, lambda: "a.bin" in w.local_pane().names())
+    w.local_pane().select(["a.bin", "b.bin"])
+
+    w.send_selected()
+    assert pump(app, w.operation_running)
+    assert w.cancel_enabled() and w.cancel_text() == "Cancel"
+    w._cancel_button.click()
+
+    assert not w.cancel_enabled()
+    assert w.cancel_text() == "Cancelling\u2026"
+    assert pump(app, lambda: not w.operation_running(), timeout=5)
+    assert w.summary_text().startswith("Cancelled")
+
+    w.send_selected()  # the next operation starts with a fresh button
+    assert pump(app, w.operation_running)
+    assert w.cancel_enabled() and w.cancel_text() == "Cancel"
+    pump(app, lambda: not w.operation_running(), timeout=5)
+    nxt.drop()
+
+
+def test_closing_the_window_makes_the_next_leave(app, window):
+    w, listener = window
+    nxt = connect_next(app, w, listener)
+    w.close()
+    assert nxt.ended.wait(timeout=3)  # told to quit, not left polling a dead link
+
+
+def test_the_quit_button_closes_the_window_and_the_next_leaves(app, window):
+    w, listener = window
+    nxt = connect_next(app, w, listener)
+    assert w.quit_text() == "Quit"
+    w._quit_button.click()
+    assert not w.isVisible()
+    assert nxt.ended.wait(timeout=3)
