@@ -28,6 +28,16 @@ class Row:
     remote: Entry | None = None
     children: list["Row"] | None = None  # the next level of a folder on both sides, once scanned
 
+    @property
+    def local_name(self) -> str:
+        """The name as Local spells it (the two sides can differ by case)."""
+        return self.local.name if self.local else self.name
+
+    @property
+    def next_name(self) -> str:
+        """The name as the Next spells it."""
+        return self.remote.name if self.remote else self.name
+
     def reverse(self) -> None:
         """Flip the direction; a row without one starts as Local to Next."""
         self.direction = "to-local" if self.direction == "to-next" else "to-next"
@@ -162,9 +172,9 @@ def expand(
     """List the next level of a folder present on both sides (Local, then the Next), under the naming rules.
 
     The Local folder's patterns apply to every level; a subfolder's own ignore file is not read."""
-    child_next = _join_next(next_dir, row.name)
+    child_next = _join_next(next_dir, row.next_name)
     row.children = compare_level(
-        _list_local(os.path.join(local_dir, row.name)), session.list_dir(child_next), child_next, ignore, show_hidden
+        _list_local(os.path.join(local_dir, row.local_name)), session.list_dir(child_next), child_next, ignore, show_hidden
     )
     row.checked = True  # unchecking the folder afterwards leaves its whole content out of Apply
     settle(row)
@@ -190,7 +200,7 @@ def recompare(
         if before.children is not None and r.state == "not-scanned":
             r.checked = before.checked
             r.children = recompare(
-                session, before.children, os.path.join(local_dir, r.name), _join_next(next_dir, r.name),
+                session, before.children, os.path.join(local_dir, r.local_name), _join_next(next_dir, r.next_name),
                 show_hidden, ignore,
             )
             settle(r)
@@ -232,7 +242,7 @@ def scan_all(
                 continue
             done += 1
         if r.children is not None:
-            pending += [(c, os.path.join(ldir, r.name), _join_next(ndir, r.name)) for c in r.children]
+            pending += [(c, os.path.join(ldir, r.local_name), _join_next(ndir, r.next_name)) for c in r.children]
     for r in rows:
         settle(r)
     return result
@@ -256,7 +266,7 @@ def apply(
             if not r.checked:
                 continue
             sub = apply(
-                session, os.path.join(local_dir, r.name), _join_next(next_dir, r.name),
+                session, os.path.join(local_dir, r.local_name), _join_next(next_dir, r.next_name),
                 r.children, progress, cancel, verify_crc,
             )
             total.failures += sub.failures
@@ -270,7 +280,7 @@ def apply(
             total.cancelled = True
             break
         if r.direction == "to-next":
-            one = send(session, [os.path.join(local_dir, r.name)], next_dir, progress, cancel, verify_crc=verify_crc)
+            one = send(session, [os.path.join(local_dir, r.local_name)], next_dir, progress, cancel, verify_crc=verify_crc)
         else:
             one = receive(session, next_dir, [r.remote], local_dir, progress, cancel)
         total.failures += one.failures

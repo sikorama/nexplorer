@@ -217,3 +217,27 @@ def test_recompare_after_apply_shows_what_is_left_keeps_expanded_folders_and_a_s
     apply(session, str(tmp_path), "d:/dest", fresh)
     assert not {b"P", b"G"} & set(nxt.commands)
     nxt.drop()
+
+
+class _RecordingSession:
+    """Stands in for a Session whose Next keeps the case of names (the fake lower-cases them)."""
+
+    def __init__(self):
+        self.listed = []
+
+    def list_dir(self, path):
+        self.listed.append(path)
+        return []
+
+
+def test_expanding_a_folder_whose_case_differs_lists_the_next_folder_under_its_own_name(tmp_path):
+    from nexplorer.compare import compare_level, expand
+    from nexplorer.protocol import Entry
+
+    (tmp_path / "Games").mkdir()
+    rows = compare_level([Entry("Games", True, 0)], [Entry("games", True, 0)], "d:/dest")
+    session = _RecordingSession()
+
+    expand(session, rows[0], str(tmp_path), "d:/dest")
+
+    assert session.listed == ["d:/dest/games"]
