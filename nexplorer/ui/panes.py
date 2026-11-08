@@ -5,7 +5,7 @@ import os
 import threading
 from typing import Callable, Protocol
 
-from PySide6.QtCore import QObject, Qt, Signal
+from PySide6.QtCore import QMimeData, QObject, Qt, Signal
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QComboBox,
@@ -68,6 +68,58 @@ class LocalBackend:
         return entries
 
 
+NEXT_ENTRIES_MIME = "application/x-nexplorer-next-entries"
+
+
+class _Tree(QTreeWidget):
+    """The list of entries; accepts files dropped from outside when `accept_urls` is set."""
+
+    urls_dropped = Signal(list, str)  # local paths, name of the folder row under the cursor ("" if none)
+    next_entries_dropped = Signal(list)  # names of entries dragged out of the Next pane
+
+    def __init__(self):
+        super().__init__()
+        self.accept_urls = False
+        self.accept_next_entries = False
+
+    def mimeData(self, items) -> QMimeData:
+        mime = QMimeData()
+        mime.setData(NEXT_ENTRIES_MIME, "\n".join(i.text(0) for i in items).encode())
+        return mime
+
+    def _wanted(self, event) -> bool:
+        mime = event.mimeData()
+        return (self.accept_urls and mime.hasUrls()) or (
+            self.accept_next_entries and mime.hasFormat(NEXT_ENTRIES_MIME)
+        )
+
+    def dragEnterEvent(self, event) -> None:
+        if self._wanted(event):
+            event.acceptProposedAction()
+        else:
+            event.ignore()  # never the default internal move: rows are not reordered by hand
+
+    def dragMoveEvent(self, event) -> None:
+        if self._wanted(event):
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+
+    def dropEvent(self, event) -> None:
+        if not self._wanted(event):
+            event.ignore()
+            return
+        if event.mimeData().hasFormat(NEXT_ENTRIES_MIME):
+            names = bytes(event.mimeData().data(NEXT_ENTRIES_MIME)).decode().split("\n")
+            event.acceptProposedAction()
+            self.next_entries_dropped.emit([n for n in names if n])
+            return
+        paths = [u.toLocalFile() for u in event.mimeData().urls() if u.isLocalFile()]
+        item = self.itemAt(event.position().toPoint())
+        event.acceptProposedAction()
+        self.urls_dropped.emit(paths, item.text(0) if item else "")
+
+
 class _Loaded(QObject):
     done = Signal(int, str, object, str)  # request id, path, entries, error
 
@@ -86,7 +138,7 @@ class FolderPane(QWidget):
         self._error = ""
         self._closed = False
 
-        self._tree = QTreeWidget()
+        self._tree = _Tree()
         self._tree.setRootIsDecorated(False)
         self._tree.setHeaderLabels([tr("Name"), tr("Size"), tr("Type")])
         self._tree.setSelectionMode(QAbstractItemView.ExtendedSelection)
@@ -117,6 +169,12 @@ class FolderPane(QWidget):
     def reload(self) -> None:
         if self._path:
             self.load(self._path)
+
+    def folder_path(self, name: str = "") -> str:
+        """The folder shown, or its subfolder `name` (the shown folder if `name` is not a folder)."""
+        if name and any(e.name == name and e.is_dir for e in self._entries):
+            return self._backend.join(self._path, name)
+        return self._path
 
     def go_up(self) -> None:
         self.load(self._backend.parent(self._path))
@@ -168,6 +226,9 @@ class FolderPane(QWidget):
             if self._tree.topLevelItem(i).isSelected()
         ]
 
+    def entries(self) -> list[Entry]:
+        return list(self._entries)
+
     def selected_entries(self) -> list[Entry]:
         names = set(self.selected_names())
         return [e for e in self._entries if e.name in names]
@@ -194,7 +255,21 @@ class FolderPane(QWidget):
                 QTreeWidgetItem([e.name, "" if e.is_dir else format_size(e.size), type_label(e)])
             )
 
+    def drag_mime(self) -> QMimeData:
+        """What a drag of the selected rows carries (also used by tests)."""
+        return self._tree.mimeData(self._tree.selectedItems())
+
     # -- observation points for tests
+    def list_view(self) -> QTreeWidget:
+        return self._tree
+
+    def row_center(self, name: str):
+        for i in range(self._tree.topLevelItemCount()):
+            item = self._tree.topLevelItem(i)
+            if item.text(0) == name:
+                return self._tree.visualItemRect(item).center()
+        raise KeyError(name)
+
     def path(self) -> str:
         return self._path
 
@@ -218,6 +293,9 @@ class FolderPane(QWidget):
 class LocalPane(FolderPane):
     def __init__(self, path: str):
         super().__init__(LocalBackend(), path)
+        self._tree.accept_next_entries = True
+        self._tree.setAcceptDrops(True)
+        self.next_entries_dropped = self._tree.next_entries_dropped
 
 
 class NextBackend:
@@ -260,6 +338,12 @@ class NextPane(FolderPane):
     def __init__(self):
         self._next = NextBackend()
         super().__init__(self._next, "")
+        self._tree.accept_urls = True
+        self._tree.setAcceptDrops(True)
+        self._tree.setDragEnabled(True)
+        self._tree.setSupportedDragActions(Qt.CopyAction)  # a Move would remove the source rows
+        self._tree.setDragDropMode(QAbstractItemView.DragDrop)
+        self.files_dropped = self._tree.urls_dropped
         self._info = _Info()
         self._info.done.connect(self._on_info)
         self._drives = QComboBox()

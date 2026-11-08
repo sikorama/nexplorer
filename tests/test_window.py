@@ -206,3 +206,139 @@ def test_the_quit_button_closes_the_window_and_the_next_leaves(app, window):
     w._quit_button.click()
     assert not w.isVisible()
     assert nxt.ended.wait(timeout=3)
+
+
+def drop_files(pane, paths, target=None):
+    """Drop external files on the Next pane's list; `target` is a row name, else empty space."""
+    from PySide6.QtCore import QMimeData, QPoint, Qt, QUrl
+    from PySide6.QtGui import QDragEnterEvent, QDragMoveEvent, QDropEvent
+
+    mime = QMimeData()
+    mime.setUrls([QUrl.fromLocalFile(p) for p in paths])
+    view = pane.list_view().viewport()
+    if target is None:
+        point = QPoint(view.width() - 2, view.height() - 2)
+    else:
+        point = pane.row_center(target)
+    for kind in (QDragEnterEvent, QDragMoveEvent, QDropEvent):
+        event = kind(point, Qt.CopyAction, mime, Qt.LeftButton, Qt.NoModifier)
+        QApplication.sendEvent(view, event)
+
+
+def test_dropping_external_files_on_the_next_pane_sends_them_into_the_shown_folder(
+    app, window, tmp_path
+):
+    w, listener = window
+    (tmp_path / "a.bin").write_bytes(b"a" * 40)
+    nxt = connect_next(app, w, listener)
+    pane = w.next_pane()
+    assert pump(app, lambda: "games" in pane.names())
+    drop_files(pane, [str(tmp_path / "a.bin")])
+    assert pump(app, lambda: nxt.fs.get("c:/a.bin") == b"a" * 40, timeout=5)
+    assert pump(app, lambda: not w.operation_running())
+    nxt.drop()
+
+
+def test_dropping_on_a_next_subfolder_sends_into_that_subfolder(app, window, tmp_path):
+    w, listener = window
+    (tmp_path / "a.bin").write_bytes(b"a" * 40)
+    nxt = connect_next(app, w, listener)
+    pane = w.next_pane()
+    assert pump(app, lambda: "games" in pane.names())
+    drop_files(pane, [str(tmp_path / "a.bin")], target="games")
+    assert pump(app, lambda: nxt.fs.get("c:/games/a.bin") == b"a" * 40, timeout=5)
+    assert pump(app, lambda: not w.operation_running())
+    assert "c:/a.bin" not in nxt.fs
+    nxt.drop()
+
+
+def test_dropping_on_a_next_file_row_sends_into_the_shown_folder(app, window, tmp_path):
+    w, listener = window
+    (tmp_path / "a.bin").write_bytes(b"a" * 40)
+    nxt = connect_next(app, w, listener)
+    pane = w.next_pane()
+    assert pump(app, lambda: "readme.txt" in pane.names())
+    drop_files(pane, [str(tmp_path / "a.bin")], target="readme.txt")
+    assert pump(app, lambda: nxt.fs.get("c:/a.bin") == b"a" * 40, timeout=5)
+    assert nxt.fs["c:/readme.txt"] == b"hello"
+    nxt.drop()
+
+
+def drop_next_entries_on_local(w, names):
+    """Start a drag of `names` from the Next pane and drop it on the Local pane's empty space."""
+    from PySide6.QtCore import QPoint, Qt
+    from PySide6.QtGui import QDragEnterEvent, QDragMoveEvent, QDropEvent
+
+    w.next_pane().select(names)
+    mime = w.next_pane().drag_mime()
+    view = w.local_pane().list_view().viewport()
+    point = QPoint(view.width() - 2, view.height() - 2)
+    for kind in (QDragEnterEvent, QDragMoveEvent, QDropEvent):
+        event = kind(point, Qt.CopyAction, mime, Qt.LeftButton, Qt.NoModifier)
+        QApplication.sendEvent(view, event)
+
+
+def test_dragging_next_entries_onto_the_local_pane_receives_them_into_the_shown_folder(
+    app, window, tmp_path
+):
+    w, listener = window
+    nxt = connect_next(app, w, listener)
+    assert pump(app, lambda: "readme.txt" in w.next_pane().names())
+    w.local_pane().go_to(str(tmp_path))
+    assert pump(app, lambda: w.local_pane().path() == str(tmp_path))
+    drop_next_entries_on_local(w, ["readme.txt"])
+    assert pump(app, lambda: (tmp_path / "readme.txt").exists() and not w.operation_running(), timeout=5)
+    assert (tmp_path / "readme.txt").read_bytes() == b"hello"
+    nxt.drop()
+
+
+def test_a_drop_during_an_operation_is_refused_in_both_directions(app, window, tmp_path):
+    w, listener = window
+    (tmp_path / "a.bin").write_bytes(b"a" * 512 * 12)
+    (tmp_path / "b.bin").write_bytes(b"b" * 10)
+    nxt = connect_next(app, w, listener, put_chunk_delay=0.05)
+    pane = w.next_pane()
+    assert pump(app, lambda: "readme.txt" in pane.names())
+    w.local_pane().go_to(str(tmp_path))
+    assert pump(app, lambda: w.local_pane().path() == str(tmp_path))
+    drop_files(pane, [str(tmp_path / "a.bin")])
+    assert pump(app, w.operation_running)
+    drop_files(pane, [str(tmp_path / "b.bin")])
+    drop_next_entries_on_local(w, ["readme.txt"])
+    assert pump(app, lambda: not w.operation_running(), timeout=5)
+    pump(app, lambda: False, timeout=0.3)
+    assert "c:/a.bin" in nxt.fs and "c:/b.bin" not in nxt.fs
+    assert not (tmp_path / "readme.txt").exists()
+    nxt.drop()
+
+
+def test_dragging_next_entries_back_onto_the_next_pane_does_nothing(app, window):
+    w, listener = window
+    nxt = connect_next(app, w, listener)
+    pane = w.next_pane()
+    assert pump(app, lambda: "games" in pane.names())
+    from PySide6.QtCore import Qt
+    from PySide6.QtGui import QDragEnterEvent, QDragMoveEvent, QDropEvent
+
+    pane.select(["readme.txt"])
+    mime = pane.drag_mime()
+    view = pane.list_view().viewport()
+    point = pane.row_center("games")
+    for kind in (QDragEnterEvent, QDragMoveEvent, QDropEvent):
+        QApplication.sendEvent(view, kind(point, Qt.CopyAction, mime, Qt.LeftButton, Qt.NoModifier))
+    pump(app, lambda: False, timeout=0.3)
+    assert not w.operation_running()
+    assert pane.names() == ["games", "readme.txt"]
+    assert sorted(nxt.fs) == sorted(k.lower() for k in FS)
+    nxt.drop()
+
+
+def test_next_entries_can_only_be_dragged_as_a_copy_so_no_row_is_removed(app, window):
+    from PySide6.QtCore import Qt
+
+    w, listener = window
+    nxt = connect_next(app, w, listener)
+    pane = w.next_pane()
+    assert pump(app, lambda: "readme.txt" in pane.names())
+    assert pane.list_view().supportedDragActions() == Qt.CopyAction  # a Move would remove the source rows
+    nxt.drop()

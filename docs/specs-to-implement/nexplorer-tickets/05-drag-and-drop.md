@@ -8,7 +8,7 @@ Label: ready-for-agent
 
 **Status:** ready-for-agent
 
-- [ ] Dropping external files on the Next pane sends them into the shown folder
-- [ ] Dropping onto a specific Next subfolder sends into that subfolder
-- [ ] Dragging Next entries onto the Local pane receives them into the shown Local folder
-- [ ] Drops respect the one-operation-at-a-time rule and show the same progress bar
+- [x] Dropping external files on the Next pane sends them into the shown folder
+- [x] Dropping onto a specific Next subfolder sends into that subfolder
+- [x] Dragging Next entries onto the Local pane receives them into the shown Local folder
+- [x] Drops respect the one-operation-at-a-time rule and show the same progress bar

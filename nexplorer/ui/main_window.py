@@ -123,6 +123,8 @@ class MainWindow(QMainWindow):
         self._bridge = ListenerBridge(listener)
         self._bridge.session_started.connect(self._show_connected)
 
+        self._next_pane.files_dropped.connect(self.drop_files)
+        self._local_pane.next_entries_dropped.connect(self.drop_next_entries)
         self._bridge.session_ready.connect(self._next_pane.bind)
         self._bridge.session_ready.connect(lambda _s: self._update_actions())
         self._bridge.session_ended.connect(self._show_waiting)
@@ -168,12 +170,27 @@ class MainWindow(QMainWindow):
         if session and paths and folder:
             self._run(lambda progress, cancel: send(session, paths, folder, progress, cancel))
 
+    def drop_files(self, paths: list[str], subfolder: str = "") -> None:
+        """Files dropped on the Next pane: send them into the folder shown, or the subfolder hit."""
+        session, folder = self._next_pane.session(), self._next_pane.folder_path(subfolder)
+        if session and paths and folder:
+            self._run(lambda progress, cancel: send(session, paths, folder, progress, cancel))
+
+    def drop_next_entries(self, names: list[str]) -> None:
+        """Next entries dragged onto the Local pane: receive them into the Local folder shown."""
+        session = self._next_pane.session()
+        wanted = set(names)
+        entries = [e for e in self._next_pane.entries() if e.name in wanted]
+        source, target = self._next_pane.path(), self._local_pane.path()
+        if session and entries and source and target:
+            self._run(lambda progress, cancel: receive(session, source, entries, target, progress, cancel))
+
     def receive_selected(self) -> None:
         """Receive the selected Next entries into the Local folder shown."""
         session = self._next_pane.session()
         entries = self._next_pane.selected_entries()
         source, target = self._next_pane.path(), self._local_pane.path()
-        if session and entries and source:
+        if session and entries and source and target:
             self._run(lambda progress, cancel: receive(session, source, entries, target, progress, cancel))
 
     def _run(self, work: Callable) -> None:
