@@ -465,3 +465,108 @@ def test_remove_refuses_unsafe_names_without_sending_anything(listener):
     assert len(result.failures) == 2
     assert b"X" not in nxt.commands and b"R" not in nxt.commands
     nxt.drop()
+
+
+MOVE_FS = {
+    "c:/src": None,
+    "c:/src/game": None,
+    "c:/src/game/one.tap": b"1" * 50,
+    "c:/src/game/sub": None,
+    "c:/src/game/sub/two.tap": b"2" * 20,
+    "c:/src/note.txt": b"note",
+    "c:/dst": None,
+    "m:/dst": None,
+}
+
+
+def _entries(*items):
+    return [Entry(n, d, s) for n, d, s in items]
+
+
+def test_copy_duplicates_entries_into_another_folder_and_keeps_the_sources(listener):
+    from nexplorer.transfer import copy
+
+    nxt, session = _session_with(listener, fs=MOVE_FS)
+    result = copy(session, "c:/src", _entries(("game", True, 0), ("note.txt", False, 4)), "c:/dst")
+    assert result.failures == []
+    assert nxt.fs["c:/dst/game/sub/two.tap"] == b"2" * 20 and nxt.fs["c:/dst/note.txt"] == b"note"
+    assert "c:/src/game/one.tap" in nxt.fs and "c:/src/note.txt" in nxt.fs
+    nxt.drop()
+
+
+def test_copy_refuses_an_existing_name_and_a_folder_into_itself(listener):
+    from nexplorer.transfer import copy
+
+    fs = dict(MOVE_FS, **{"c:/dst/note.txt": b"keep me"})
+    nxt, session = _session_with(listener, fs=fs)
+    result = copy(session, "c:/src", _entries(("note.txt", False, 4)), "c:/dst")
+    assert [f.name for f in result.failures] == ["c:/src/note.txt"]
+    assert nxt.fs["c:/dst/note.txt"] == b"keep me"
+    result = copy(session, "c:/src", _entries(("game", True, 0)), "c:/src/game/sub")
+    assert len(result.failures) == 1
+    assert b"C" not in nxt.commands
+    nxt.drop()
+
+
+def test_move_on_the_same_drive_is_a_rename_with_no_copy(listener):
+    from nexplorer.transfer import move
+
+    nxt, session = _session_with(listener, fs=MOVE_FS)
+    result = move(session, "c:/src", _entries(("game", True, 0), ("note.txt", False, 4)), "c:/dst")
+    assert result.failures == []
+    assert "c:/dst/game/sub/two.tap" in nxt.fs and "c:/dst/note.txt" in nxt.fs
+    assert not any(k.startswith("c:/src/game") for k in nxt.fs) and "c:/src/note.txt" not in nxt.fs
+    assert b"C" not in nxt.commands
+    nxt.drop()
+
+
+def test_move_across_drives_copies_checks_the_size_then_deletes_the_source(listener):
+    from nexplorer.transfer import move
+
+    nxt, session = _session_with(listener, fs=MOVE_FS)
+    result = move(session, "c:/src", _entries(("game", True, 0), ("note.txt", False, 4)), "m:/dst")
+    assert result.failures == [] and not result.cancelled
+    assert nxt.fs["m:/dst/game/one.tap"] == b"1" * 50 and nxt.fs["m:/dst/game/sub/two.tap"] == b"2" * 20
+    assert nxt.fs["m:/dst/note.txt"] == b"note"
+    assert not any(k.startswith("c:/src/") for k in nxt.fs)
+    assert nxt.commands.index(b"C") < nxt.commands.index(b"X")  # copied before anything is deleted
+    nxt.drop()
+
+
+def test_a_failing_cross_drive_move_keeps_the_source_and_says_so(listener):
+    from nexplorer.transfer import move
+
+    nxt, session = _session_with(listener, fs=MOVE_FS, copy_fails_after=1)
+    result = move(session, "c:/src", _entries(("game", True, 0)), "m:/dst")
+    assert len(result.failures) == 1 and "kept" in result.failures[0].reason
+    assert "c:/src/game/one.tap" in nxt.fs and "c:/src/game/sub/two.tap" in nxt.fs
+    assert b"X" not in nxt.commands and b"R" not in nxt.commands
+    nxt.drop()
+
+
+def test_a_cross_drive_move_whose_copy_came_out_short_keeps_the_source(listener):
+    from nexplorer.transfer import move
+
+    nxt, session = _session_with(listener, fs=MOVE_FS, copy_silently_truncates=True)
+    result = move(session, "c:/src", _entries(("note.txt", False, 4)), "m:/dst")
+    assert len(result.failures) == 1 and "kept" in result.failures[0].reason
+    assert nxt.fs["c:/src/note.txt"] == b"note"
+    nxt.drop()
+
+
+def test_move_refuses_an_existing_name_a_folder_into_itself_and_the_same_folder(listener):
+    from nexplorer.transfer import move
+
+    fs = dict(MOVE_FS, **{"c:/dst/note.txt": b"keep me"})
+    nxt, session = _session_with(listener, fs=fs)
+    result = move(
+        session, "c:/src",
+        _entries(("note.txt", False, 4), ("game", True, 0)),
+        "c:/dst",
+    )
+    assert [f.name for f in result.failures] == ["c:/src/note.txt"]
+    assert nxt.fs["c:/src/note.txt"] == b"note" and nxt.fs["c:/dst/note.txt"] == b"keep me"
+    assert "c:/dst/game/one.tap" in nxt.fs  # the other entry still moved
+    assert len(move(session, "c:/src", _entries(("note.txt", False, 4)), "c:/src").failures) == 1
+    assert len(move(session, "c:/dst", _entries(("game", True, 0)), "c:/dst/game/sub").failures) == 1
+    nxt.drop()

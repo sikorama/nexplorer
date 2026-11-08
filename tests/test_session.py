@@ -474,3 +474,50 @@ def test_remove_dir_deletes_an_empty_folder_only(listener):
         session.remove_dir("d:/full", timeout=2)
     assert nxt.fs == {"d:/full": None, "d:/full/x": b"1"}
     nxt.drop()
+
+
+def test_copy_duplicates_a_file_across_drives_and_keeps_the_source(listener):
+    nxt, session = _session_with(listener, fs={"c:/a.tap": b"tape"})
+    session.copy("c:/a.tap", "m:/b.tap", timeout=2)
+    assert nxt.fs == {"c:/a.tap": b"tape", "m:/b.tap": b"tape"}
+    nxt.drop()
+
+
+def test_copy_of_a_folder_copies_the_whole_tree_and_merges_into_an_existing_one(listener):
+    nxt, session = _session_with(
+        listener,
+        fs={"c:/g": None, "c:/g/one": b"1", "c:/g/s": None, "c:/g/s/two": b"2", "m:/g": None, "m:/g/old": b"o"},
+    )
+    session.copy("c:/g", "m:/g", timeout=2)
+    assert nxt.fs["m:/g/one"] == b"1" and nxt.fs["m:/g/s/two"] == b"2" and nxt.fs["m:/g/old"] == b"o"
+    assert nxt.fs["c:/g/one"] == b"1"
+    nxt.drop()
+
+
+def test_copy_refuses_a_destination_inside_the_source_without_sending_it(listener):
+    nxt, session = _session_with(listener, fs={"c:/g": None, "c:/g/one": b"1"})
+    for dest in ("c:/g/inner", "C:/G", "c:/g/"):
+        with pytest.raises(RemoteError):
+            session.copy("c:/g", dest, timeout=2)
+    assert b"C" not in nxt.commands
+    nxt.drop()
+
+
+def test_a_failing_copy_raises_and_leaves_the_files_already_copied(listener):
+    nxt, session = _session_with(
+        listener,
+        fs={"c:/g": None, "c:/g/a": b"1", "c:/g/b": b"2", "c:/g/c": b"3"},
+        copy_fails_after=1,
+    )
+    with pytest.raises(RemoteError):
+        session.copy("c:/g", "m:/g", timeout=2)
+    copied = [k for k in nxt.fs if k.startswith("m:/g/")]
+    assert len(copied) == 1  # copied files stay, like an interrupted cp
+    nxt.drop()
+
+
+def test_copy_on_a_dot_that_ignores_the_opcode_raises_instead_of_crashing(listener):
+    nxt, session = _session_with(listener, fs={"c:/a": b"1"}, ignores=frozenset({b"C"}))
+    with pytest.raises(RemoteError):
+        session.copy("c:/a", "m:/a", timeout=2)
+    nxt.drop()

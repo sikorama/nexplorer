@@ -290,6 +290,19 @@ class Session:
         if reply is None or reply[:1] != b"O":
             raise RemoteError(f"cannot rename {old} to {new}")
 
+    def copy(self, src: str, dst: str, timeout: float | None = None) -> None:
+        """Copy a file or a whole folder tree on the Next, across drives, with no data on the
+        wire. A folder is merged into an existing one. RemoteError when anything fails; the
+        files already copied stay. A destination inside the source is refused before sending
+        (the dot does not guard against it)."""
+        wire_src, wire_dst = _wire_path(src), _wire_path(dst)
+        a, b = src.lower().rstrip("/"), dst.lower().rstrip("/")
+        if b == a or b.startswith(a + "/"):
+            raise RemoteError(f"cannot copy {src} onto or into itself")
+        blocks = self._call(b"C" + wire_src + b"\x00" + wire_dst, timeout, terminals=(b"O", b"F"))
+        if not blocks or blocks[-1][:1] != b"O":  # no blocks: an old dot ignored the opcode
+            raise RemoteError(f"cannot copy {src} to {dst}")
+
     def remove_file(self, path: str, timeout: float | None = None) -> None:
         """Delete a file on the Next (there is no recycle bin); RemoteError when it fails."""
         reply = self._call(b"X" + _wire_path(path), timeout)

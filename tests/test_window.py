@@ -337,24 +337,124 @@ def test_a_drop_during_an_operation_is_refused_in_both_directions(app, window, t
     nxt.drop()
 
 
-def test_dragging_next_entries_back_onto_the_next_pane_does_nothing(app, window):
+def drag_within_next(pane, names, target=None):
+    """Drag `names` of the Next pane onto its row `target` (empty space when None)."""
+    from PySide6.QtCore import QPoint, Qt
+    from PySide6.QtGui import QDragEnterEvent, QDragMoveEvent, QDropEvent
+
+    pane.select(names)
+    mime = pane.drag_mime()
+    view = pane.list_view().viewport()
+    point = QPoint(view.width() - 2, view.height() - 2) if target is None else pane.row_center(target)
+    for kind in (QDragEnterEvent, QDragMoveEvent, QDropEvent):
+        QApplication.sendEvent(view, kind(point, Qt.MoveAction, mime, Qt.LeftButton, Qt.NoModifier))
+
+
+def test_dragging_next_entries_onto_a_file_row_or_empty_space_of_the_next_pane_does_nothing(app, window):
     w, listener = window
     nxt = connect_next(app, w, listener)
     pane = w.next_pane()
     assert pump(app, lambda: "games" in pane.names())
-    from PySide6.QtCore import Qt
-    from PySide6.QtGui import QDragEnterEvent, QDragMoveEvent, QDropEvent
-
-    pane.select(["readme.txt"])
-    mime = pane.drag_mime()
-    view = pane.list_view().viewport()
-    point = pane.row_center("games")
-    for kind in (QDragEnterEvent, QDragMoveEvent, QDropEvent):
-        QApplication.sendEvent(view, kind(point, Qt.CopyAction, mime, Qt.LeftButton, Qt.NoModifier))
+    drag_within_next(pane, ["games"], target="readme.txt")
+    drag_within_next(pane, ["readme.txt"], target=None)
     pump(app, lambda: False, timeout=0.3)
     assert not w.operation_running()
     assert pane.names() == ["games", "readme.txt"]
     assert sorted(nxt.fs) == sorted(k.lower() for k in FS)
+    nxt.drop()
+
+
+def test_dragging_next_entries_onto_a_next_folder_moves_them_into_it(app, window):
+    w, listener = window
+    nxt = connect_next(app, w, listener)
+    pane = w.next_pane()
+    assert pump(app, lambda: "games" in pane.names())
+    drag_within_next(pane, ["readme.txt"], target="games")
+    assert pump(app, lambda: pane.names() == ["games"], timeout=5)
+    assert nxt.fs["c:/games/readme.txt"] == b"hello" and "c:/readme.txt" not in nxt.fs
+    assert b"C" not in nxt.commands  # same drive: a rename
+    nxt.drop()
+
+
+def test_copy_then_paste_duplicates_into_the_folder_shown_and_can_paste_again(app, window):
+    w, listener = window
+    nxt = connect_next(app, w, listener)
+    pane = w.next_pane()
+    assert pump(app, lambda: "readme.txt" in pane.names())
+    assert not w.paste_enabled() and not w.copy_enabled() and not w.cut_enabled()
+    pane.select(["readme.txt"])
+    assert w.copy_enabled() and w.cut_enabled()
+    w.copy_selected()
+    assert w.paste_enabled()
+    pane.enter("games")
+    assert pump(app, lambda: pane.names() == ["manic.tap"])
+    w.paste()
+    assert pump(app, lambda: pane.names() == ["manic.tap", "readme.txt"], timeout=5)
+    assert nxt.fs["c:/readme.txt"] == b"hello" and nxt.fs["c:/games/readme.txt"] == b"hello"
+    assert w.paste_enabled()  # a copy can be pasted again
+    nxt.drop()
+
+
+def test_cut_then_paste_moves_on_the_same_drive_and_empties_the_clipboard(app, window):
+    w, listener = window
+    nxt = connect_next(app, w, listener)
+    pane = w.next_pane()
+    assert pump(app, lambda: "readme.txt" in pane.names())
+    pane.select(["readme.txt"])
+    w.cut_selected()
+    pane.enter("games")
+    assert pump(app, lambda: pane.names() == ["manic.tap"])
+    w.paste()
+    assert pump(app, lambda: pane.names() == ["manic.tap", "readme.txt"], timeout=5)
+    assert "c:/readme.txt" not in nxt.fs and b"C" not in nxt.commands
+    assert pump(app, lambda: not w.paste_enabled())
+    nxt.drop()
+
+
+def test_cut_then_paste_on_another_drive_moves_by_copy_and_delete(app, window):
+    w, listener = window
+    nxt = connect_next(app, w, listener)
+    pane = w.next_pane()
+    assert pump(app, lambda: pane.drives() == ["C", "M"] and "readme.txt" in pane.names())
+    pane.select(["readme.txt"])
+    w.cut_selected()
+    pane.switch_drive("M")
+    assert pump(app, lambda: pane.names() == ["tmp.bin"])
+    w.paste()
+    assert pump(app, lambda: pane.names() == ["readme.txt", "tmp.bin"], timeout=5)
+    assert nxt.fs["m:/readme.txt"] == b"hello" and "c:/readme.txt" not in nxt.fs
+    nxt.drop()
+
+
+def test_a_paste_that_clashes_reports_it_and_a_cut_keeps_its_source(app, window):
+    w, listener = window
+    nxt = connect_next(app, w, listener)
+    pane = w.next_pane()
+    assert pump(app, lambda: "readme.txt" in pane.names())
+    pane.select(["readme.txt"])
+    w.cut_selected()
+    w.paste()  # same folder: refused
+    assert pump(app, lambda: "already" in w.summary_text(), timeout=5)
+    assert nxt.fs["c:/readme.txt"] == b"hello"
+    nxt.drop()
+
+
+def test_ctrl_x_and_ctrl_v_on_the_next_pane_move_the_selection(app, window):
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+
+    w, listener = window
+    nxt = connect_next(app, w, listener)
+    pane = w.next_pane()
+    assert pump(app, lambda: "readme.txt" in pane.names())
+    w.show()
+    pane.list_view().setFocus()
+    pane.select(["readme.txt"])
+    QTest.keyClick(pane.list_view(), Qt.Key_X, Qt.ControlModifier)
+    pane.enter("games")
+    assert pump(app, lambda: pane.names() == ["manic.tap"])
+    QTest.keyClick(pane.list_view(), Qt.Key_V, Qt.ControlModifier)
+    assert pump(app, lambda: "c:/games/readme.txt" in nxt.fs, timeout=5)
     nxt.drop()
 
 

@@ -338,6 +338,130 @@ def _one(folder: str, name: str, action: Callable[[str], None]) -> Result:
     return result
 
 
+# -- copy and move inside the Next
+def copy(
+    session: Session,
+    next_dir: str,
+    entries: list[Entry],
+    target_dir: str,
+    progress: Progress | None = None,
+    cancel: Callable[[], bool] | None = None,
+    timeout: float = 60,
+) -> Result:
+    """Copy Next entries from `next_dir` into `target_dir` on the Next; no data crosses the wire.
+    An existing name is never overwritten."""
+    return _transfer(session, next_dir, entries, target_dir, progress, cancel, timeout, move=False)
+
+
+def move(
+    session: Session,
+    next_dir: str,
+    entries: list[Entry],
+    target_dir: str,
+    progress: Progress | None = None,
+    cancel: Callable[[], bool] | None = None,
+    timeout: float = 60,
+) -> Result:
+    """Move Next entries into `target_dir`: a rename on the same drive; across drives a copy,
+    a size check and only then the delete of the source. Any failure keeps the source."""
+    return _transfer(session, next_dir, entries, target_dir, progress, cancel, timeout, move=True)
+
+
+def _transfer(session, next_dir, entries, target_dir, progress, cancel, timeout, move: bool) -> Result:
+    job = _Job(session, progress, cancel, timeout, len(entries))
+    try:
+        try:
+            existing = {e.name.lower() for e in session.list_dir(target_dir, timeout=timeout)}
+        except (RemoteError, OSError) as exc:
+            for entry in entries:
+                job.fail(_join(next_dir, entry.name), f"cannot list {target_dir}: {exc}")
+            return job.result
+        for entry in entries:
+            job.check_cancel()
+            source, target = _join(next_dir, entry.name), _join(target_dir, entry.name)
+            reason = _refusal(next_dir, entry, target_dir, existing)
+            if reason:
+                job.fail(source, reason)
+            elif move and _drive(source) == _drive(target):
+                _guarded(job, source, lambda: session.rename(source, target, timeout=timeout))
+            elif move:
+                _move_across(job, source, target, entry)
+            else:
+                _guarded(job, source, lambda: session.copy(source, target, timeout=timeout))
+            job.finished(1)
+            job.report(entry.name)
+    except _Stop:
+        pass
+    return job.result
+
+
+def _refusal(next_dir: str, entry: Entry, target_dir: str, existing: set[str]) -> str:
+    if not is_plain_name(entry.name):
+        return f"unsafe name {entry.name!r}"
+    folder, target = _norm(next_dir), _norm(target_dir)
+    source = _norm(_join(next_dir, entry.name))
+    if folder == target:
+        return "already in that folder"
+    if target == source or target.startswith(source + "/"):
+        return "cannot go into itself"
+    if entry.name.lower() in existing:
+        return "a file or folder of that name already exists there"
+    return ""
+
+
+def _guarded(job: _Job, source: str, action: Callable[[], None]) -> None:
+    try:
+        action()
+    except (RemoteError, OSError) as exc:
+        job.fail(source, str(exc))
+
+
+def _move_across(job: _Job, source: str, target: str, entry: Entry) -> None:
+    """Copy, check the size, then delete the source; the source is kept on any doubt."""
+    session, timeout = job.session, job.timeout
+    try:
+        session.copy(source, target, timeout=timeout)
+        expected, found = _measure(job, source, entry), _measure(job, target, entry)
+    except (RemoteError, OSError) as exc:
+        job.fail(source, f"{exc}; source kept")
+        return
+    if expected != found:
+        job.fail(source, f"copy differs from the source ({found} against {expected}); source kept")
+        return
+    node = _scan(job, _parent(source), [entry])[0]
+    _delete(job, _parent(source), [node])
+
+
+def _measure(job: _Job, path: str, entry: Entry) -> tuple[int, int]:
+    """(files, bytes) under `path`, from fresh listings."""
+    if not entry.is_dir:
+        for e in job.session.list_dir(_parent(path), timeout=job.timeout):
+            if e.name == entry.name:
+                return 1, e.size
+        raise RemoteError(f"{path} not found after the copy")
+    files = size = 0
+    for e in job.session.list_dir(path, timeout=job.timeout):
+        if e.is_dir:
+            f, b = _measure(job, _join(path, e.name), e)
+        else:
+            f, b = 1, e.size
+        files, size = files + f, size + b
+    return files, size
+
+
+def _drive(path: str) -> str:
+    return path[:2].lower()
+
+
+def _norm(path: str) -> str:
+    return path.lower().rstrip("/")
+
+
+def _parent(path: str) -> str:
+    head = path.rstrip("/").rpartition("/")[0]
+    return head if len(head) > 2 else head + "/"
+
+
 # -- helpers
 def is_plain_name(name: str) -> bool:
     """A name the Next sent that stays one component inside the Local folder."""

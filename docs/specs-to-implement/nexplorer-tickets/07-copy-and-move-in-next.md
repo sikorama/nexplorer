@@ -8,9 +8,9 @@ Label: ready-for-agent
 
 **Status:** ready-for-agent
 
-- [ ] Copy inside the Next duplicates entries without transferring data through Local
-- [ ] Ctrl+X marks entries, Ctrl+V performs the Move; dragging onto a Next folder performs the same Move
-- [ ] Same-drive Move is a rename and leaves no copy of the source
-- [ ] Cross-drive Move copies, checks size, then deletes the source
-- [ ] A failing cross-drive Move (fake Next failure injected) keeps the source and reports the failure
-- [ ] Tests cover same-drive and cross-drive Move, including the failure that must keep the source
+- [x] Copy inside the Next duplicates entries without transferring data through Local
+- [x] Ctrl+X marks entries, Ctrl+V performs the Move; dragging onto a Next folder performs the same Move
+- [x] Same-drive Move is a rename and leaves no copy of the source
+- [x] Cross-drive Move copies, checks size, then deletes the source
+- [x] A failing cross-drive Move (fake Next failure injected) keeps the source and reports the failure
+- [x] Tests cover same-drive and cross-drive Move, including the failure that must keep the source

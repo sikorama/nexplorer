@@ -21,7 +21,7 @@ from PySide6.QtWidgets import (
 
 from nexplorer.i18n import tr
 from nexplorer.protocol import Listener
-from nexplorer.transfer import Result, is_plain_name, make_folder, receive, remove, rename, send
+from nexplorer.transfer import Result, copy, is_plain_name, make_folder, move, receive, remove, rename, send
 from nexplorer.ui.bridge import ListenerBridge
 from nexplorer.ui.panes import LocalPane, NextPane
 
@@ -102,6 +102,12 @@ class MainWindow(QMainWindow):
         self._new_folder.clicked.connect(self.new_folder)
         self._rename = QPushButton(tr("Rename on Next"))
         self._rename.clicked.connect(self.rename_selected)
+        self._copy = QPushButton(tr("Copy on Next"))
+        self._copy.clicked.connect(self.copy_selected)
+        self._cut = QPushButton(tr("Cut on Next"))
+        self._cut.clicked.connect(self.cut_selected)
+        self._paste = QPushButton(tr("Paste on Next"))
+        self._paste.clicked.connect(self.paste)
         self._delete = QPushButton(tr("Delete on Next"))
         self._delete.clicked.connect(self.delete_selected)
         actions = QHBoxLayout()
@@ -109,6 +115,9 @@ class MainWindow(QMainWindow):
         actions.addWidget(self._receive)
         actions.addWidget(self._new_folder)
         actions.addWidget(self._rename)
+        actions.addWidget(self._copy)
+        actions.addWidget(self._cut)
+        actions.addWidget(self._paste)
         actions.addWidget(self._delete)
         actions.addStretch(1)
         self._disconnect = QPushButton(tr("Disconnect"))
@@ -140,6 +149,8 @@ class MainWindow(QMainWindow):
         self._operation.progress.connect(self._on_progress)
         self._operation.finished.connect(self._on_finished)
         self._disconnecting = False
+        self._clipboard: tuple[str, str, list] | None = None  # ("copy" or "cut", Next folder, entries)
+        self._clear_clipboard_if_clean = False
         self._operation.disconnected.connect(self._on_disconnected)
         self._next_pane.selection_changed.connect(self._update_actions)
 
@@ -157,7 +168,11 @@ class MainWindow(QMainWindow):
         self._bridge.session_started.connect(self._show_connected)
 
         self._next_pane.files_dropped.connect(self.drop_files)
-        self._local_pane.next_entries_dropped.connect(self.drop_next_entries)
+        self._local_pane.next_entries_dropped.connect(lambda names, _row: self.drop_next_entries(names))
+        self._next_pane.entries_moved.connect(self.move_dropped)
+        self._next_pane.copy_requested.connect(self.copy_selected)
+        self._next_pane.cut_requested.connect(self.cut_selected)
+        self._next_pane.paste_requested.connect(self.paste)
         self._bridge.session_ready.connect(self._next_pane.bind)
         self._bridge.session_ready.connect(lambda _s: self._update_actions())
         self._bridge.session_ended.connect(self._show_waiting)
@@ -173,6 +188,7 @@ class MainWindow(QMainWindow):
         return box
 
     def _show_waiting(self) -> None:
+        self._clipboard = None
         self._next_pane.unbind()
         lines = [tr("Waiting for a Next"), ""]
         for name, ip in self._local_addresses():
@@ -246,6 +262,40 @@ class MainWindow(QMainWindow):
         new = self._ask_name(tr("Rename"), old)
         if new and new != old and self._plain(new):
             self._run(lambda progress, cancel: rename(session, folder, old, new))
+
+    def copy_selected(self) -> None:
+        """Mark the selected Next entries to be copied by the next paste."""
+        self._mark("copy")
+
+    def cut_selected(self) -> None:
+        """Mark the selected Next entries to be moved by the next paste."""
+        self._mark("cut")
+
+    def _mark(self, mode: str) -> None:
+        entries = self._next_pane.selected_entries()
+        if self._next_pane.session() is not None and entries:
+            self._clipboard = (mode, self._next_pane.path(), entries)
+            self._update_actions()
+
+    def paste(self) -> None:
+        """Copy or move the marked entries into the Next folder shown."""
+        session, target = self._next_pane.session(), self._next_pane.path()
+        if not session or not target or self._clipboard is None or self._busy:
+            return
+        mode, source, entries = self._clipboard
+        action = move if mode == "cut" else copy
+        self._clear_clipboard_if_clean = mode == "cut"  # a failed move can be retried
+        self._run(lambda progress, cancel: action(session, source, entries, target, progress, cancel))
+
+    def move_dropped(self, names: list[str], row: str) -> None:
+        """Next entries dropped on a folder row of the Next pane: move them into that folder."""
+        session, source = self._next_pane.session(), self._next_pane.path()
+        target = self._next_pane.folder_path(row) if row else ""
+        wanted = set(names)
+        entries = [e for e in self._next_pane.entries() if e.name in wanted]
+        if session and source and target and target != source and entries:
+            self._clear_clipboard_if_clean = False
+            self._run(lambda progress, cancel: move(session, source, entries, target, progress, cancel))
 
     def _plain(self, name: str) -> bool:
         if is_plain_name(name):
@@ -327,6 +377,11 @@ class MainWindow(QMainWindow):
     def _on_finished(self, outcome) -> None:
         self._busy = False
         self._op_row.hide()
+        if isinstance(outcome, Result) and self._clear_clipboard_if_clean and not (
+            outcome.failures or outcome.cancelled
+        ):
+            self._clipboard = None
+        self._clear_clipboard_if_clean = False
         if isinstance(outcome, Result):
             lines = [f"{f.name}: {f.reason}" for f in outcome.failures]
             head = tr("Cancelled") if outcome.cancelled else tr("Done")
@@ -349,6 +404,9 @@ class MainWindow(QMainWindow):
         self._new_folder.setEnabled(enabled)
         self._rename.setEnabled(enabled and selected == 1)
         self._delete.setEnabled(enabled and selected >= 1)
+        self._copy.setEnabled(enabled and selected >= 1)
+        self._cut.setEnabled(enabled and selected >= 1)
+        self._paste.setEnabled(enabled and self._clipboard is not None)
         self._disconnect.setEnabled(connected and not self._disconnecting)
         self._next_pane.setEnabled(not self._busy)  # the serial link is busy: no queued listings
 
@@ -367,6 +425,15 @@ class MainWindow(QMainWindow):
 
     def disconnect_enabled(self) -> bool:
         return self._disconnect.isEnabled()
+
+    def copy_enabled(self) -> bool:
+        return self._copy.isEnabled()
+
+    def cut_enabled(self) -> bool:
+        return self._cut.isEnabled()
+
+    def paste_enabled(self) -> bool:
+        return self._paste.isEnabled()
 
     def delete_text(self) -> str:
         return self._delete.text()

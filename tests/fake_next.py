@@ -43,6 +43,8 @@ class FakeNext:
         put_chunk_delay: float = 0.0,
         put_stalls_at_chunk: int | None = None,
         get_drops_after_blocks: int | None = None,
+        copy_fails_after: int | None = None,
+        copy_silently_truncates: bool = False,
     ):
         """`ignores`: opcodes an older dot does not know (silently ignored).
         `drops_on`: opcodes on which the link dies mid-command.
@@ -60,7 +62,7 @@ class FakeNext:
         Next claims a packetno mismatch at that chunk index (it sends `Restart`
         once and starts the file again). `put_chunk_delay`: seconds the Next takes
         before asking for each put chunk. `put_stalls_at_chunk`: the Next stops
-        answering a put at that chunk index (until `drop`). `get_drops_after_blocks`: the link dies after that many `D`
+        answering a put at that chunk index (until `drop`). `copy_fails_after`: a copy (`C`) stops with `F` after that many files copied. `copy_silently_truncates`: `C` reports success but drops the last byte of each file. `get_drops_after_blocks`: the link dies after that many `D`
         blocks of a get. `commands`: opcodes received, in order (idle `I` excluded)."""
         self.host, self.port, self.version = host, port, version
         self.ignores, self.drops_on, self.poll_interval = ignores, drops_on, poll_interval
@@ -76,6 +78,8 @@ class FakeNext:
         self.put_restart_at_chunk = put_restart_at_chunk
         self.put_chunk_delay, self.put_stalls_at_chunk = put_chunk_delay, put_stalls_at_chunk
         self.get_drops_after_blocks = get_drops_after_blocks
+        self.copy_fails_after = copy_fails_after
+        self.copy_silently_truncates = copy_silently_truncates
         self.retries_sent = 0
         self.listed: list[str] = []  # paths received by `L`, in order
         self.max_listing_block = 0  # largest `D` listing block sent, in bytes
@@ -184,6 +188,9 @@ class FakeNext:
                 elif op == b"V":
                     old, _, new = arg.partition(b"\x00")
                     self._rename(old.decode("ascii"), new.decode("ascii"))
+                elif op == b"C":
+                    src, _, dst = arg.partition(b"\x00")
+                    self._copy(src.decode("ascii"), dst.decode("ascii"))
                 elif op in (b"X", b"R"):
                     self._remove(arg.decode("ascii"), folder=op == b"R")
                 elif op == b"P":
@@ -295,6 +302,28 @@ class FakeNext:
             self._push_status(b"E", no)
             no += 1
         self._push_status(b"B", no)
+
+    def _copy(self, src: str, dst: str) -> None:
+        """rcpy: copy a file or a whole tree, a `D` block per file (its destination), then `O` or `F`."""
+        src, dst = src.lower().rstrip("/"), dst.lower().rstrip("/")
+        if src not in self.fs:
+            self._push_status(b"F")
+            return
+        todo = [(k, dst + k[len(src):]) for k in sorted(self.fs) if k == src or k.startswith(src + "/")]
+        copied, no = 0, 0
+        for from_key, to_key in todo:
+            if self.copy_fails_after is not None and copied >= self.copy_fails_after:
+                self._push_status(b"F", no)
+                return
+            content = self.fs[from_key]
+            if content is None:
+                self.fs.setdefault(to_key, None)
+                continue
+            self.fs[to_key] = content[:-1] if self.copy_silently_truncates else content
+            copied += 1
+            self._push_status(b"D" + to_key.encode("ascii"), no)
+            no += 1
+        self._push_status(b"O", no)
 
     def _remove(self, path: str, folder: bool) -> None:
         key = path.lower().rstrip("/")
