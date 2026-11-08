@@ -8,9 +8,9 @@ Label: ready-for-agent
 
 **Status:** ready-for-agent
 
-- [ ] Creating a folder on the Next shows it in the listing
-- [ ] Renaming a file or folder on the Next updates the listing
-- [ ] Deleting selected entries, including non-empty folders, removes them from the fake Next after confirmation
-- [ ] The confirmation names the item count and the first item's name; declining deletes nothing
-- [ ] Operations use the shared one-at-a-time progress mechanism
-- [ ] Tests cover make folder, rename and recursive remove at the Session/fake Next seam
+- [x] Creating a folder on the Next shows it in the listing
+- [x] Renaming a file or folder on the Next updates the listing
+- [x] Deleting selected entries, including non-empty folders, removes them from the fake Next after confirmation
+- [x] The confirmation names the item count and the first item's name; declining deletes nothing
+- [x] Operations use the shared one-at-a-time progress mechanism
+- [x] Tests cover make folder, rename and recursive remove at the Session/fake Next seam

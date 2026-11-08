@@ -151,6 +151,7 @@ class FolderPane(QWidget):
         self._address = QLineEdit(path)
         self._address.returnPressed.connect(lambda: self.go_to(self._address.text()))
         self._status = QLabel()
+        self.selection_changed = self._tree.itemSelectionChanged
         self._tree.itemActivated.connect(lambda item, _c: self.enter(item.text(0)))
         col = QVBoxLayout(self)
         bar = QHBoxLayout()

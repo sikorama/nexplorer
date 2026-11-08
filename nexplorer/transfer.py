@@ -1,4 +1,4 @@
-"""Send Local entries to the Next and receive Next entries into Local (Qt-free).
+"""Send Local entries to the Next, receive Next entries into Local and delete Next entries (Qt-free).
 
 Nothing here ever deletes anything on Local. `progress(name, percent)` and
 `cancel()` are called from the thread that runs the transfer or from the
@@ -218,7 +218,7 @@ def _scan(job: _Job, folder: str, entries: list[Entry]) -> list[_Node]:
     for entry in entries:
         job.check_cancel()
         node = _Node(entry)
-        if entry.is_dir and _safe_name(entry.name):
+        if entry.is_dir and is_plain_name(entry.name):
             path = _join(folder, entry.name)
             try:
                 node.children = _scan(job, path, job.session.list_dir(path, timeout=job.timeout))
@@ -239,7 +239,7 @@ def _download(job: _Job, folder: str, nodes: list[_Node], local: str) -> None:
         entry = node.entry
         job.check_cancel()
         source = _join(folder, entry.name)
-        if not _safe_name(entry.name):
+        if not is_plain_name(entry.name):
             job.fail(source, f"unsafe name {entry.name!r}: not received")
             continue
         target = os.path.join(local, entry.name)
@@ -266,8 +266,80 @@ def _download(job: _Job, folder: str, nodes: list[_Node], local: str) -> None:
             job.fail(source, str(exc))
 
 
+# -- remove
+def remove(
+    session: Session,
+    next_dir: str,
+    entries: list[Entry],
+    progress: Progress | None = None,
+    cancel: Callable[[], bool] | None = None,
+    timeout: float = 60,
+) -> Result:
+    """Delete Next entries from `next_dir`, folders with their content (no recycle bin).
+
+    The Next has no recursive delete: each folder is listed, its files deleted, then the
+    folder itself, bottom-up. Progress counts items. Cancel is honoured between items."""
+    job = _Job(session, progress, cancel, timeout, 0)
+    try:
+        nodes = _scan(job, next_dir, entries)
+        job.set_total(sum(_item_count(n) for n in nodes))
+        _delete(job, next_dir, nodes)
+    except _Stop:
+        pass
+    return job.result
+
+
+def _item_count(node: _Node) -> int:
+    return 1 + sum(_item_count(c) for c in node.children)
+
+
+def _delete(job: _Job, folder: str, nodes: list[_Node]) -> None:
+    for node in nodes:
+        entry = node.entry
+        job.check_cancel()
+        path = _join(folder, entry.name)
+        if not is_plain_name(entry.name):
+            job.fail(path, f"unsafe name {entry.name!r}: not deleted")
+            continue
+        try:
+            if entry.is_dir:
+                if node.error:
+                    raise node.error
+                _delete(job, path, node.children)
+                job.session.remove_dir(path, timeout=job.timeout)
+            else:
+                job.session.remove_file(path, timeout=job.timeout)
+        except (RemoteError, OSError) as exc:
+            job.fail(path, str(exc))
+        job.finished(1)
+        job.report(entry.name)
+
+
+def make_folder(session: Session, next_dir: str, name: str, timeout: float = 60) -> Result:
+    """Create the folder `name` inside `next_dir`."""
+    return _one(next_dir, name, lambda path: session.make_dir(path, timeout=timeout))
+
+
+def rename(session: Session, next_dir: str, old: str, new: str, timeout: float = 60) -> Result:
+    """Rename `old` to `new` inside `next_dir`."""
+    return _one(next_dir, new, lambda _path: session.rename(_join(next_dir, old), _join(next_dir, new), timeout=timeout))
+
+
+def _one(folder: str, name: str, action: Callable[[str], None]) -> Result:
+    result = Result()
+    path = _join(folder, name)
+    if not is_plain_name(name):
+        result.failures.append(Failure(path, f"unsafe name {name!r}"))
+        return result
+    try:
+        action(path)
+    except (RemoteError, OSError) as exc:
+        result.failures.append(Failure(path, str(exc)))
+    return result
+
+
 # -- helpers
-def _safe_name(name: str) -> bool:
+def is_plain_name(name: str) -> bool:
     """A name the Next sent that stays one component inside the Local folder."""
     return name not in ("", ".", "..") and not any(c in name for c in "/\\:\0")
 

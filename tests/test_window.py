@@ -27,11 +27,36 @@ def pump(app, predicate, timeout=3.0):
     return False
 
 
+class Prompts:
+    """Stands in for the dialogs: scripted answers, and what the window asked."""
+
+    def __init__(self):
+        self.name = None  # what the user types in the name prompt; None = cancel
+        self.confirm = True
+        self.asked = []
+        self.confirmations = []
+
+    def ask_name(self, title, initial=""):
+        self.asked.append((title, initial))
+        return self.name
+
+    def confirm_delete(self, message):
+        self.confirmations.append(message)
+        return self.confirm
+
+
 @pytest.fixture
 def window(app):
     listener = Listener(host="127.0.0.1", port=0)
     listener.start()
-    w = MainWindow(listener, local_addresses=lambda: [("eth0", "192.168.1.20")])
+    prompts = Prompts()
+    w = MainWindow(
+        listener,
+        local_addresses=lambda: [("eth0", "192.168.1.20")],
+        ask_name=prompts.ask_name,
+        confirm_delete=prompts.confirm_delete,
+    )
+    w.prompts = prompts
     w.show()
     yield w, listener
     w.close()
@@ -342,3 +367,127 @@ def test_next_entries_can_only_be_dragged_as_a_copy_so_no_row_is_removed(app, wi
     assert pump(app, lambda: "readme.txt" in pane.names())
     assert pane.list_view().supportedDragActions() == Qt.CopyAction  # a Move would remove the source rows
     nxt.drop()
+
+
+def test_new_folder_creates_it_on_the_next_and_shows_it(app, window):
+    w, listener = window
+    nxt = connect_next(app, w, listener)
+    pane = w.next_pane()
+    assert pump(app, lambda: "games" in pane.names())
+    w.prompts.name = "demos"
+    w.new_folder()
+    assert pump(app, lambda: "demos" in pane.names(), timeout=5)
+    assert nxt.fs["c:/demos"] is None
+    w.prompts.name = None  # cancelled prompt: nothing happens
+    w.new_folder()
+    assert not w.operation_running()
+    nxt.drop()
+
+
+def test_rename_changes_the_name_on_the_next_and_in_the_listing(app, window):
+    w, listener = window
+    nxt = connect_next(app, w, listener)
+    pane = w.next_pane()
+    assert pump(app, lambda: "readme.txt" in pane.names())
+    pane.select(["readme.txt"])
+    w.prompts.name = "intro.txt"
+    w.rename_selected()
+    assert w.prompts.asked[-1][1] == "readme.txt"  # the prompt starts from the current name
+    assert pump(app, lambda: "intro.txt" in pane.names() and "readme.txt" not in pane.names(), timeout=5)
+    assert nxt.fs["c:/intro.txt"] == b"hello"
+    nxt.drop()
+
+
+def test_rename_needs_exactly_one_selected_entry_and_a_plain_name(app, window):
+    w, listener = window
+    nxt = connect_next(app, w, listener)
+    pane = w.next_pane()
+    assert pump(app, lambda: "readme.txt" in pane.names())
+    pane.select(["readme.txt", "games"])
+    w.prompts.name = "x"
+    w.rename_selected()
+    assert not w.operation_running() and w.prompts.asked == []
+    pane.select(["readme.txt"])
+    w.prompts.name = "../evil"
+    w.rename_selected()
+    assert not w.operation_running()
+    pump(app, lambda: False, timeout=0.2)
+    assert "c:/readme.txt" in nxt.fs
+    nxt.drop()
+
+
+def test_delete_asks_naming_the_count_and_the_first_item_then_removes_everything(app, window):
+    w, listener = window
+    nxt = connect_next(app, w, listener)
+    pane = w.next_pane()
+    assert pump(app, lambda: "games" in pane.names())
+    pane.select(["games", "readme.txt"])
+    w.delete_selected()
+    assert len(w.prompts.confirmations) == 1
+    assert "2" in w.prompts.confirmations[0] and "games" in w.prompts.confirmations[0]
+    assert pump(app, lambda: pane.names() == [], timeout=5)
+    assert "c:/games" not in nxt.fs and "c:/games/manic.tap" not in nxt.fs
+    assert "c:/readme.txt" not in nxt.fs
+    nxt.drop()
+
+
+def test_declining_the_delete_confirmation_deletes_nothing(app, window):
+    w, listener = window
+    nxt = connect_next(app, w, listener)
+    pane = w.next_pane()
+    assert pump(app, lambda: "games" in pane.names())
+    pane.select(["games"])
+    w.prompts.confirm = False
+    w.delete_selected()
+    assert not w.operation_running()
+    pump(app, lambda: False, timeout=0.2)
+    assert "c:/games/manic.tap" in nxt.fs and pane.names() == ["games", "readme.txt"]
+    nxt.drop()
+
+
+def test_next_buttons_name_the_next_and_follow_the_selection(app, window):
+    w, listener = window
+    assert not w.delete_enabled() and not w.rename_enabled()  # no Session yet
+    nxt = connect_next(app, w, listener)
+    pane = w.next_pane()
+    assert pump(app, lambda: "games" in pane.names())
+    assert all("Next" in t for t in (w.delete_text(), w.rename_text(), w.new_folder_text()))
+    assert w.new_folder_enabled()
+    assert not w.delete_enabled() and not w.rename_enabled()  # nothing selected
+    pane.select(["readme.txt"])
+    assert w.delete_enabled() and w.rename_enabled()
+    pane.select(["readme.txt", "games"])
+    assert w.delete_enabled() and not w.rename_enabled()  # rename takes exactly one
+    pane.select([])
+    assert not w.delete_enabled()
+    nxt.drop()
+
+
+def test_the_delete_confirmation_says_it_deletes_on_the_next(app, window):
+    w, listener = window
+    nxt = connect_next(app, w, listener)
+    pane = w.next_pane()
+    assert pump(app, lambda: "readme.txt" in pane.names())
+    pane.select(["readme.txt"])
+    w.prompts.confirm = False
+    w.delete_selected()
+    assert "Next" in w.prompts.confirmations[0]
+    nxt.drop()
+
+
+def test_disconnect_ends_the_session_and_leaves_the_window_waiting_for_another_next(app, window):
+    w, listener = window
+    assert not w.disconnect_enabled()
+    nxt = connect_next(app, w, listener)
+    assert pump(app, w.disconnect_enabled)
+    w._disconnect.click()
+    assert nxt.ended.wait(timeout=5)  # told to quit, not left polling
+    assert pump(app, lambda: w.next_pane_state() == "waiting", timeout=5)
+    assert w.isVisible() and not w.disconnect_enabled()
+    second = FakeNext(listener.port, fs=FS, free_blocks={"C": 2048})
+    end = time.time() + 3
+    while second.connect() != b"Listening" and time.time() < end:
+        second = FakeNext(listener.port, fs=FS, free_blocks={"C": 2048})
+        time.sleep(0.02)
+    assert pump(app, lambda: w.next_pane_state() == "connected")
+    second.drop()

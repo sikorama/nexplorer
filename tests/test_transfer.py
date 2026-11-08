@@ -404,3 +404,64 @@ def test_cancel_during_the_scan_of_a_receive_stops_it(listener, tmp_path):
     assert result.cancelled
     assert list(tmp_path.iterdir()) == []
     nxt.drop()
+
+
+REMOVE_FS = {
+    "d:/dest": None,
+    "d:/dest/games": None,
+    "d:/dest/games/one.tap": b"1",
+    "d:/dest/games/sub": None,
+    "d:/dest/games/sub/two.tap": b"2",
+    "d:/dest/games/empty": None,
+    "d:/dest/keep.txt": b"k",
+    "d:/dest/note.txt": b"n",
+}
+
+
+def test_remove_deletes_files_and_non_empty_folders_leaving_the_rest(listener):
+    from nexplorer.transfer import remove
+
+    nxt, session = _session_with(listener, fs=REMOVE_FS)
+    entries = [Entry("games", True, 0), Entry("note.txt", False, 1)]
+    seen = []
+    result = remove(session, "d:/dest", entries, progress=lambda n, p: seen.append(p))
+    assert result.failures == [] and not result.cancelled
+    assert nxt.fs == {"d:/dest": None, "d:/dest/keep.txt": b"k"}
+    assert seen and seen[-1] == 100
+    nxt.drop()
+
+
+def test_remove_reports_a_failing_item_and_carries_on(listener):
+    from nexplorer.transfer import remove
+
+    nxt, session = _session_with(listener, fs=REMOVE_FS)
+    result = remove(session, "d:/dest", [Entry("ghost.txt", False, 1), Entry("note.txt", False, 1)])
+    assert [f.name for f in result.failures] == ["d:/dest/ghost.txt"]
+    assert "d:/dest/note.txt" not in nxt.fs
+    nxt.drop()
+
+
+def test_remove_stops_when_cancelled_and_deletes_nothing_more(listener):
+    from nexplorer.transfer import remove
+
+    nxt, session = _session_with(listener, fs=REMOVE_FS)
+    calls = []
+
+    def cancel():
+        calls.append(1)
+        return len(calls) > 3  # scanning one folder level costs checks; stop during the deletes
+
+    result = remove(session, "d:/dest", [Entry("note.txt", False, 1), Entry("keep.txt", False, 1)], cancel=cancel)
+    assert result.cancelled
+    assert "d:/dest/keep.txt" in nxt.fs
+    nxt.drop()
+
+
+def test_remove_refuses_unsafe_names_without_sending_anything(listener):
+    from nexplorer.transfer import remove
+
+    nxt, session = _session_with(listener, fs=REMOVE_FS)
+    result = remove(session, "d:/dest", [Entry("..", True, 0), Entry("a/b", False, 1)])
+    assert len(result.failures) == 2
+    assert b"X" not in nxt.commands and b"R" not in nxt.commands
+    nxt.drop()

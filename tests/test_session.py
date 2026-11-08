@@ -420,3 +420,57 @@ def test_ending_the_session_makes_the_next_leave_and_waits_for_it(listener):
 
 def test_ending_the_session_without_one_returns_at_once(listener):
     assert listener.end_session(timeout=3) is True
+
+
+def _session_with(listener, **kwargs):
+    nxt = FakeNext(listener.port, **kwargs)
+    nxt.connect()
+    return nxt, listener.wait_session(timeout=2)
+
+
+def test_rename_moves_a_file_and_a_folder_in_place(listener):
+    nxt, session = _session_with(
+        listener, fs={"d:/games": None, "d:/games/a.tap": b"x", "d:/note.txt": b"hi"}
+    )
+    session.rename("d:/note.txt", "d:/readme.txt", timeout=2)
+    session.rename("d:/games", "d:/arcade", timeout=2)
+    assert nxt.fs == {"d:/arcade": None, "d:/arcade/a.tap": b"x", "d:/readme.txt": b"hi"}
+    nxt.drop()
+
+
+def test_rename_onto_an_existing_name_or_a_missing_source_fails(listener):
+    nxt, session = _session_with(listener, fs={"d:/a": b"1", "d:/b": b"2"})
+    with pytest.raises(RemoteError):
+        session.rename("d:/a", "d:/b", timeout=2)
+    with pytest.raises(RemoteError):
+        session.rename("d:/nope", "d:/c", timeout=2)
+    assert nxt.fs == {"d:/a": b"1", "d:/b": b"2"}
+    nxt.drop()
+
+
+def test_rename_refuses_dot_components_and_never_sends_them(listener):
+    nxt, session = _session_with(listener, fs={"d:/a": b"1"})
+    with pytest.raises(RemoteError):
+        session.rename("d:/a", "d:/../b", timeout=2)
+    assert b"V" not in nxt.commands
+    nxt.drop()
+
+
+def test_remove_file_deletes_a_file_and_fails_on_a_missing_one(listener):
+    nxt, session = _session_with(listener, fs={"d:/a": b"1", "d:/b": b"2"})
+    session.remove_file("d:/a", timeout=2)
+    assert nxt.fs == {"d:/b": b"2"}
+    with pytest.raises(RemoteError):
+        session.remove_file("d:/a", timeout=2)
+    nxt.drop()
+
+
+def test_remove_dir_deletes_an_empty_folder_only(listener):
+    nxt, session = _session_with(
+        listener, fs={"d:/empty": None, "d:/full": None, "d:/full/x": b"1"}
+    )
+    session.remove_dir("d:/empty", timeout=2)
+    with pytest.raises(RemoteError):
+        session.remove_dir("d:/full", timeout=2)
+    assert nxt.fs == {"d:/full": None, "d:/full/x": b"1"}
+    nxt.drop()

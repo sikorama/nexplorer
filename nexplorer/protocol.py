@@ -284,6 +284,24 @@ class Session:
         if reply is None or reply[:1] != b"O":
             raise RemoteError(f"cannot create {path}")
 
+    def rename(self, old: str, new: str, timeout: float | None = None) -> None:
+        """Rename a file or folder on the Next; RemoteError when it is refused."""
+        reply = self._call(b"V" + _wire_path(old) + b"\x00" + _wire_path(new), timeout)
+        if reply is None or reply[:1] != b"O":
+            raise RemoteError(f"cannot rename {old} to {new}")
+
+    def remove_file(self, path: str, timeout: float | None = None) -> None:
+        """Delete a file on the Next (there is no recycle bin); RemoteError when it fails."""
+        reply = self._call(b"X" + _wire_path(path), timeout)
+        if reply is None or reply[:1] != b"O":
+            raise RemoteError(f"cannot delete {path}")
+
+    def remove_dir(self, path: str, timeout: float | None = None) -> None:
+        """Delete an empty folder on the Next; RemoteError when it fails or is not empty."""
+        reply = self._call(b"R" + _wire_path(path), timeout)
+        if reply is None or reply[:1] != b"O":
+            raise RemoteError(f"cannot delete folder {path}")
+
     def close(self) -> None:
         """End the Session: the Next is told to quit at its next poll."""
         self._closing = True

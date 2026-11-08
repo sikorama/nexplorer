@@ -181,6 +181,11 @@ class FakeNext:
                     self._get(arg.decode("ascii"))
                 elif op == b"M":
                     self._mkdir(arg.decode("ascii"))
+                elif op == b"V":
+                    old, _, new = arg.partition(b"\x00")
+                    self._rename(old.decode("ascii"), new.decode("ascii"))
+                elif op in (b"X", b"R"):
+                    self._remove(arg.decode("ascii"), folder=op == b"R")
                 elif op == b"P":
                     self._put(arg.decode("ascii"))
                 elif op == b"Q":
@@ -290,6 +295,29 @@ class FakeNext:
             self._push_status(b"E", no)
             no += 1
         self._push_status(b"B", no)
+
+    def _remove(self, path: str, folder: bool) -> None:
+        key = path.lower().rstrip("/")
+        # X on a directory is Unverified on a real Next: the fake refuses it.
+        if key not in self.fs or (self.fs[key] is None) != folder:
+            self._push_status(b"F")
+            return
+        if folder and any(k.startswith(key + "/") for k in self.fs):
+            self._push_status(b"F")
+            return
+        del self.fs[key]
+        self._push_status(b"O")
+
+    def _rename(self, old: str, new: str) -> None:
+        old, new = old.lower().rstrip("/"), new.lower().rstrip("/")
+        parent = new.rpartition("/")[0]
+        parent_ok = (len(parent) == 2 and parent[1] == ":") or self.fs.get(parent, b"") is None
+        if old not in self.fs or new in self.fs or not parent_ok:
+            self._push_status(b"F")
+            return
+        for key in [k for k in self.fs if k == old or k.startswith(old + "/")]:
+            self.fs[new + key[len(old):]] = self.fs.pop(key)
+        self._push_status(b"O")
 
     def _mkdir(self, path: str) -> None:
         key = path.lower().rstrip("/")
