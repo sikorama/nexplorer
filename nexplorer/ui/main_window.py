@@ -28,6 +28,7 @@ from PySide6.QtWidgets import (
 )
 
 from nexplorer import settings as settings_store
+from nexplorer.capabilities import MINIMUM_DOT, Capabilities, capabilities
 from nexplorer.i18n import available_languages, set_language, tr
 from nexplorer.compare import (
     Row,
@@ -221,6 +222,11 @@ class MainWindow(QMainWindow):
         op.addWidget(self._cancel_button)
         self._summary = QLabel()
         self._summary.setTextFormat(Qt.PlainText)
+        self._dot_notice = QLabel()
+        self._dot_notice.setTextFormat(Qt.PlainText)
+        self._dot_notice.hide()
+        self._capabilities = Capabilities()
+        self._version_known = False
         self._op_row.hide()
         self._busy = False
         self._cancel = threading.Event()
@@ -237,6 +243,7 @@ class MainWindow(QMainWindow):
         column.addLayout(actions)
         column.addWidget(self._views, 1)
         column.addWidget(self._summary)
+        column.addWidget(self._dot_notice)
         column.addWidget(self._op_row)
         self.setCentralWidget(root)
         self.resize(900, 500)
@@ -262,6 +269,7 @@ class MainWindow(QMainWindow):
         self._next_pane.paste_requested.connect(self.paste)
         self._bridge.session_ready.connect(self._next_pane.bind)
         self._bridge.session_ready.connect(lambda _s: self._update_actions())
+        self._bridge.dot_version.connect(self._on_dot_version)
         self._bridge.session_ended.connect(self._show_waiting)
 
     @staticmethod
@@ -274,7 +282,21 @@ class MainWindow(QMainWindow):
         col.addWidget(body, 1)
         return box
 
+    def _on_dot_version(self, version: str) -> None:
+        """The dot announced its version ("" when it did not answer `Y`): grey what it lacks."""
+        self._capabilities = capabilities(version or None)
+        self._version_known = True
+        missing = not self._capabilities.complete
+        text = tr("The dot on the Next is too old for some actions: update .sync5 to version") + f" {MINIMUM_DOT}"
+        self._dot_notice.setText(text if missing else "")
+        self._dot_notice.setVisible(missing)
+        self._update_actions()
+
     def _show_waiting(self) -> None:
+        self._capabilities = Capabilities()
+        self._version_known = False
+        self._dot_notice.setText("")
+        self._dot_notice.hide()
         self._clipboard = None
         self._next_pane.unbind()
         lines = [tr("Waiting for a Next"), ""]
@@ -303,14 +325,14 @@ class MainWindow(QMainWindow):
         session = self._next_pane.session()
         paths = [os.path.join(self._local_pane.path(), e.name) for e in self._local_pane.selected_entries()]
         folder = self._next_pane.path()
-        verify = self._settings.crc_after_upload
+        verify = self._settings.crc_after_upload and self._capabilities.crc
         if session and paths and folder:
             self._run(lambda progress, cancel: send(session, paths, folder, progress, cancel, verify_crc=verify))
 
     def drop_files(self, paths: list[str], subfolder: str = "") -> None:
         """Files dropped on the Next pane: send them into the folder shown, or the subfolder hit."""
         session, folder = self._next_pane.session(), self._next_pane.folder_path(subfolder)
-        verify = self._settings.crc_after_upload
+        verify = self._settings.crc_after_upload and self._capabilities.crc
         if session and paths and folder:
             self._run(lambda progress, cancel: send(session, paths, folder, progress, cancel, verify_crc=verify))
 
@@ -362,14 +384,14 @@ class MainWindow(QMainWindow):
 
     def _mark(self, mode: str) -> None:
         entries = self._next_pane.selected_entries()
-        if self._next_pane.session() is not None and entries:
+        if self._next_pane.session() is not None and entries and self._capabilities.copy:
             self._clipboard = (mode, self._next_pane.path(), entries)
             self._update_actions()
 
     def paste(self) -> None:
         """Copy or move the marked entries into the Next folder shown."""
         session, target = self._next_pane.session(), self._next_pane.path()
-        if not session or not target or self._clipboard is None or self._busy:
+        if not session or not target or self._clipboard is None or self._busy or not self._capabilities.copy:
             return
         mode, source, entries = self._clipboard
         action = move if mode == "cut" else copy
@@ -382,7 +404,7 @@ class MainWindow(QMainWindow):
         target = self._next_pane.folder_path(row) if row else ""
         wanted = set(names)
         entries = [e for e in self._next_pane.entries() if e.name in wanted]
-        if session and source and target and target != source and entries:
+        if session and source and target and target != source and entries and self._capabilities.copy:
             self._clear_clipboard_if_clean = False
             self._run(lambda progress, cancel: move(session, source, entries, target, progress, cancel))
 
@@ -444,13 +466,13 @@ class MainWindow(QMainWindow):
         session = self._next_pane.session()
         local_dir, next_dir = self._local_pane.path(), self._next_pane.path()
         rows = self._compare_view.rows()
-        if session and local_dir and next_dir:
+        if session and local_dir and next_dir and self._capabilities.crc:
             self._run(lambda _progress, cancel: verify_rows(session, local_dir, next_dir, rows, cancel))
 
     def _apply_rows(self, rows: list) -> None:
         session = self._next_pane.session()
         local_dir, next_dir = self._local_pane.path(), self._next_pane.path()
-        verify = self._settings.crc_after_upload
+        verify = self._settings.crc_after_upload and self._capabilities.crc
         if session and local_dir and next_dir:
             self._run(
                 lambda progress, cancel: apply_rows(
@@ -600,19 +622,30 @@ class MainWindow(QMainWindow):
         self._send.setEnabled(enabled)
         self._receive.setEnabled(enabled)
         self._new_folder.setEnabled(enabled)
-        self._rename.setEnabled(enabled and selected == 1)
+        self._rename.setEnabled(enabled and self._capabilities.rename and selected == 1)
         self._delete.setEnabled(enabled and selected >= 1)
-        self._copy.setEnabled(enabled and selected >= 1)
-        self._cut.setEnabled(enabled and selected >= 1)
-        self._paste.setEnabled(enabled and self._clipboard is not None)
+        can_copy = self._capabilities.copy
+        self._copy.setEnabled(enabled and can_copy and selected >= 1)
+        self._cut.setEnabled(enabled and can_copy and selected >= 1)
+        self._paste.setEnabled(enabled and can_copy and self._clipboard is not None)
         self._disconnect.setEnabled(connected and not self._disconnecting)
         self._compare.setEnabled(enabled)
         self._compare_view.set_busy(self._busy)
+        self._compare_view.set_verify_available(self._capabilities.crc)
         self._next_pane.setEnabled(not self._busy)  # the serial link is busy: no queued listings
 
     # -- observation points for tests
     def operation_running(self) -> bool:
         return self._busy
+
+    def dot_notice(self) -> str:
+        return self._dot_notice.text()
+
+    def dot_version_known(self) -> bool:
+        return self._version_known
+
+    def compare_verify_enabled(self) -> bool:
+        return self._compare_view.verify_enabled()
 
     def delete_enabled(self) -> bool:
         return self._delete.isEnabled()
