@@ -5,12 +5,13 @@ from __future__ import annotations
 
 import fnmatch
 import os
+import zlib
 from collections import Counter
 from dataclasses import dataclass
 from typing import Callable
 
-from nexplorer.protocol import Entry, Session
-from nexplorer.transfer import Progress, Result, receive, send
+from nexplorer.protocol import Entry, RemoteError, Session, Unanswered
+from nexplorer.transfer import Failure, Progress, Result, receive, send
 
 
 # Rows shown to the user but never transferred.
@@ -20,7 +21,7 @@ BLOCKED = frozenset({"conflict", "invalid", "ignored", "hidden"})
 @dataclass
 class Row:
     name: str
-    state: str  # "only-local", "only-next", "different", "identical" or a blocked state
+    state: str  # "only-local", "only-next", "different", "unverified", "identical" or a blocked state
     direction: str | None  # "to-next", "to-local" or None
     checked: bool
     local: Entry | None = None
@@ -78,7 +79,7 @@ def compare_level(
     ignore: list[str] = (),
     show_hidden: bool = True,
 ) -> list[Row]:
-    """One row per name found on either side; sizes alone tell different from identical.
+    """One row per name found on either side; a size mismatch is different, the same size stays unverified until Verify.
 
     Entries that must not move (invalid, conflicting, ignored, hidden) stay as rows in a
     blocked state, never dropped."""
@@ -98,7 +99,7 @@ def compare_level(
         elif other.size != e.size:
             rows.append(Row(e.name, "different", None, False, e, other))
         else:
-            rows.append(Row(e.name, "identical", None, False, e, other))
+            rows.append(Row(e.name, "unverified", None, False, e, other))
     for e in remote:
         if e.name.casefold() in local_names:
             continue
@@ -134,4 +135,40 @@ def apply(
         if one.cancelled or one.dropped:
             total.cancelled, total.dropped = one.cancelled, one.dropped
             break
+    return total
+
+
+def verify(
+    session: Session,
+    local_dir: str,
+    next_dir: str,
+    rows: list[Row],
+    cancel: Callable[[], bool] | None = None,
+    timeout: float = 60,
+) -> Result:
+    """Settle the unverified rows: the Next's CRC-32 against the Local CRC, one file at a time.
+
+    Only same-size files are asked (they are the unverified rows). A file whose CRC cannot
+    be read stays unverified; a lost Session stops the run."""
+    total = Result()
+    for r in rows:
+        if r.state != "unverified" or r.remote is None or r.remote.is_dir:
+            continue
+        if cancel and cancel():
+            total.cancelled = True
+            break
+        target = next_dir.rstrip("/") + "/" + r.name
+        try:
+            expected = 0
+            with open(os.path.join(local_dir, r.name), "rb") as f:
+                while chunk := f.read(65536):
+                    expected = zlib.crc32(chunk, expected)
+            found = session.crc(target, timeout=timeout + r.remote.size / 15_000)
+        except (RemoteError, OSError) as exc:
+            total.failures.append(Failure(target, f"CRC not checked: {exc}"))
+            if isinstance(exc, (TimeoutError, ConnectionError, Unanswered)):
+                total.dropped = True
+                break
+            continue
+        r.state = "identical" if found == expected else "different"
     return total

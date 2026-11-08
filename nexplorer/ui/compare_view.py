@@ -26,6 +26,7 @@ def _states() -> dict[str, str]:
         "only-local": tr("Only on Local"),
         "only-next": tr("Only on the Next"),
         "different": tr("Different"),
+        "unverified": tr("Unverified"),
         "identical": tr("Identical"),
         "conflict": tr("Conflict"),
         "invalid": tr("Invalid"),
@@ -43,6 +44,7 @@ class CompareView(QWidget):
 
     transfer_requested = Signal(str)
     apply_requested = Signal()
+    verify_requested = Signal()
     back_requested = Signal()
 
     def __init__(self):
@@ -58,12 +60,14 @@ class CompareView(QWidget):
         self._reverse.clicked.connect(self._reverse_selected)
         self._one = QPushButton(tr("Transfer this file"))
         self._one.clicked.connect(lambda: self._with_selected(self.transfer_requested.emit))
+        self._verify = QPushButton(tr("Verify"))
+        self._verify.clicked.connect(self.verify_requested)
         self._apply = QPushButton(tr("Apply"))
         self._apply.clicked.connect(self.apply_requested)
         self._back = QPushButton(tr("Back to the panes"))
         self._back.clicked.connect(self.back_requested)
         buttons = QHBoxLayout()
-        for b in (self._reverse, self._one, self._apply):
+        for b in (self._reverse, self._one, self._verify, self._apply):
             buttons.addWidget(b)
         buttons.addStretch(1)
         buttons.addWidget(self._back)
@@ -75,6 +79,9 @@ class CompareView(QWidget):
     def show_rows(self, title: str, rows: list[Row]) -> None:
         self._title.setText(title)
         self._rows = rows
+        self._fill()
+
+    def refresh(self) -> None:
         self._fill()
 
     def _fill(self) -> None:

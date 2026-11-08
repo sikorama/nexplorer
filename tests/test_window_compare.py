@@ -42,7 +42,7 @@ def test_compare_lists_the_differences_of_the_folders_shown_and_back_restores_th
         assert sorted(w.compare_rows()) == [
             ("clash.tap", "different", "", False),
             ("down.tap", "only-next", "to-local", True),
-            ("same.tap", "identical", "", False),
+            ("same.tap", "unverified", "", False),
             ("up.tap", "only-local", "to-next", True),
         ]
         w.compare_back()
@@ -121,3 +121,22 @@ def test_compare_needs_a_session(app, tmp_path):
     with opened(app, path) as (w, _):
         w.compare()
         assert not w.compare_active()
+
+
+def test_verify_settles_the_unverified_rows_through_the_next_crc_and_only_when_asked(app, tmp_path):
+    path = local_folder(tmp_path)
+    (tmp_path / "local" / "other.tap").write_bytes(b"yy")
+    with opened(app, path) as (w, listener):
+        nxt = prepare(app, w, listener, tmp_path, {**NEXT_FS, "c:/dest/other.tap": b"xx"})
+        w.compare()
+        states = {name: state for name, state, _, _ in w.compare_rows()}
+        assert states["same.tap"] == states["other.tap"] == "unverified"
+        assert b"K" not in nxt.commands
+
+        w.compare_verify()
+        assert pump(app, lambda: w.operation_running())
+        assert pump(app, lambda: not w.operation_running(), timeout=10)
+        states = {name: state for name, state, _, _ in w.compare_rows()}
+        assert (states["same.tap"], states["other.tap"], states["clash.tap"]) == ("identical", "different", "different")
+        assert nxt.commands.count(b"K") == 2
+        nxt.drop()

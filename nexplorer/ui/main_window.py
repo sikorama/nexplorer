@@ -28,7 +28,7 @@ from PySide6.QtWidgets import (
 
 from nexplorer import settings as settings_store
 from nexplorer.i18n import available_languages, set_language, tr
-from nexplorer.compare import Row, apply as apply_rows, compare_level, read_ignore
+from nexplorer.compare import Row, apply as apply_rows, compare_level, read_ignore, verify as verify_rows
 from nexplorer.protocol import Listener
 from nexplorer.transfer import Result, copy, is_plain_name, make_folder, move, receive, remove, rename, send
 from nexplorer.settings import Settings
@@ -241,6 +241,7 @@ class MainWindow(QMainWindow):
 
         self._compare_view.transfer_requested.connect(self.compare_transfer)
         self._compare_view.apply_requested.connect(self.compare_apply)
+        self._compare_view.verify_requested.connect(self.compare_verify)
         self._compare_view.back_requested.connect(self.compare_back)
         self._next_pane.files_dropped.connect(self.drop_files)
         self._local_pane.next_entries_dropped.connect(lambda names, _row: self.drop_next_entries(names))
@@ -427,6 +428,14 @@ class MainWindow(QMainWindow):
         """Transfer every checked row, one after the other."""
         self._apply_rows(self._compare_view.rows())
 
+    def compare_verify(self) -> None:
+        """Ask the Next for the CRC-32 of the same-size files and settle their rows."""
+        session = self._next_pane.session()
+        local_dir, next_dir = self._local_pane.path(), self._next_pane.path()
+        rows = self._compare_view.rows()
+        if session and local_dir and next_dir:
+            self._run(lambda _progress, cancel: verify_rows(session, local_dir, next_dir, rows, cancel))
+
     def _apply_rows(self, rows: list) -> None:
         session = self._next_pane.session()
         local_dir, next_dir = self._local_pane.path(), self._next_pane.path()
@@ -528,6 +537,7 @@ class MainWindow(QMainWindow):
             self._summary.setText(f"{tr('Failed')}: {outcome}")
         self._next_pane.reload()
         self._local_pane.reload()
+        self._compare_view.refresh()
         self._update_actions()
 
     def _update_actions(self) -> None:
