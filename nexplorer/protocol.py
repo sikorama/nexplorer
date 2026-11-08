@@ -4,6 +4,7 @@ from __future__ import annotations
 import queue
 import socket
 import threading
+from dataclasses import dataclass
 
 MIN_FRAME = 5
 MAX_FRAME = 4096
@@ -21,6 +22,23 @@ def checksum(payload: bytes) -> tuple[int, int]:
 def encode_frame(payload: bytes, packetno: int = 0) -> bytes:
     c0, c1 = checksum(payload)
     return (len(payload) + 5).to_bytes(2, "big") + payload + bytes([c0, c1, packetno & 0xFF])
+
+
+@dataclass(frozen=True)
+class Entry:
+    name: str
+    is_dir: bool
+    size: int
+
+
+@dataclass(frozen=True)
+class Drives:
+    current: str
+    letters: list[str]
+
+
+class RemoteError(Exception):
+    """The Next answered a command with a failure."""
 
 
 class Listener:
@@ -130,6 +148,36 @@ class Session:
         except (IndexError, UnicodeDecodeError):
             return None
 
+    def list_dir(self, path: str, timeout: float | None = None) -> list[Entry]:
+        """The entries of a folder on the Next; RemoteError if it cannot be opened."""
+        blocks = self._call(b"L" + path.encode("ascii"), timeout, terminals=(b"E", b"F"))
+        if blocks[-1][:1] == b"F":
+            raise RemoteError(f"cannot list {path}")
+        entries: list[Entry] = []
+        for block in blocks:
+            if block[:1] == b"D":
+                entries.extend(_parse_entries(block[1:]))
+        return entries
+
+    def drives(self, timeout: float | None = None) -> Drives | None:
+        """The drives of the Next, or None when the dot does not answer `W`."""
+        reply = self._call(b"W", timeout)
+        if reply is None:
+            return None
+        if reply[:1] != b"O":
+            raise RemoteError("cannot read the drives")
+        text = reply[1:].decode("ascii")
+        return Drives(text[:1], list(text[1:]))
+
+    def free_space(self, drive: str, timeout: float | None = None) -> int | None:
+        """Free bytes on a drive, or None when the dot does not answer `Z`."""
+        reply = self._call(b"Z" + drive.encode("ascii"), timeout)
+        if reply is None:
+            return None
+        if reply[:1] != b"O" or len(reply) < 5:
+            raise RemoteError(f"cannot measure drive {drive}")
+        return int.from_bytes(reply[1:5], "little") * 512
+
     def close(self) -> None:
         """End the Session: the Next is told to quit at its next poll."""
         self._closing = True
@@ -138,8 +186,13 @@ class Session:
         return self._closed.wait(timeout)
 
     # -- internals
-    def _call(self, command: bytes, timeout: float | None) -> bytes | None:
-        call = _Call(command)
+    def _call(self, command: bytes, timeout: float | None, terminals=None):
+        """Send one command and wait for its reply.
+
+        Without `terminals` the reply is one block (returned as bytes, or None
+        when the dot ignores the opcode). With `terminals`, blocks are read up
+        to one whose opcode is a terminal; the list of blocks is returned."""
+        call = _Call(command, terminals)
         with self._lock:
             if self._dead:
                 raise ConnectionError("session closed")
@@ -206,7 +259,10 @@ class Session:
         """Read the Next's answer to a command; a raw message means no answer."""
         first = self._recv_exact(1)
         if first[0] < 0x20:  # a framed block: the high byte of its length
-            call.result = self._read_block(first, expected_no=0)
+            blocks = [self._read_block(first, expected_no=0)]
+            while call.terminals and blocks[-1][:1] not in call.terminals:
+                blocks.append(self._read_block(self._recv_exact(1), expected_no=len(blocks)))
+            call.result = blocks if call.terminals else blocks[0]
             call.done.set()
             return
         if first == b"P":  # unknown opcode (old dot): it just polled again
@@ -250,9 +306,23 @@ class Session:
 
 
 class _Call:
-    def __init__(self, command: bytes):
+    def __init__(self, command: bytes, terminals=None):
         self.command = command
-        self.result: bytes | None = None
+        self.terminals = terminals
+        self.result = None
         self.error: Exception | None = None
         self.cancelled = False
         self.done = threading.Event()
+
+
+def _parse_entries(data: bytes) -> list[Entry]:
+    entries = []
+    i = 0
+    while i + 6 <= len(data):
+        flags = data[i]
+        size = int.from_bytes(data[i + 1 : i + 5], "little")
+        namelen = data[i + 5]
+        name = data[i + 6 : i + 6 + namelen].decode("ascii", "replace")
+        entries.append(Entry(name, bool(flags & 1), size))
+        i += 6 + namelen
+    return entries

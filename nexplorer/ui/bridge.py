@@ -10,6 +10,7 @@ from nexplorer.protocol import Listener
 
 class ListenerBridge(QObject):
     session_started = Signal(str)  # Next's address
+    session_ready = Signal(object)  # the Session itself
     dot_version = Signal(str)
     session_ended = Signal()
 
@@ -28,6 +29,7 @@ class ListenerBridge(QObject):
             if session is None:
                 continue
             self._emit(self.session_started, session.peer_address)
+            self._emit(self.session_ready, session)
             try:
                 version = session.dot_version(timeout=30)
             except (ConnectionError, TimeoutError):

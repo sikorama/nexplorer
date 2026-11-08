@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from typing import Callable
 
 from PySide6.QtCore import Qt
@@ -16,6 +17,7 @@ from PySide6.QtWidgets import (
 from nexplorer.i18n import tr
 from nexplorer.protocol import Listener
 from nexplorer.ui.bridge import ListenerBridge
+from nexplorer.ui.panes import LocalPane, NextPane
 
 SYNC_COMMAND = ".sync5 -l"
 CONFIG_FILE = "c:/sys/config/nextsync.cfg"
@@ -50,14 +52,19 @@ class MainWindow(QMainWindow):
         self._waiting.setAlignment(Qt.AlignCenter)
         self._waiting.setWordWrap(True)
         self._connected = QLabel()
-        self._connected.setAlignment(Qt.AlignCenter)
+        self._next_pane = NextPane()
+        self._connected_page = QWidget()
+        page = QVBoxLayout(self._connected_page)
+        page.addWidget(self._connected)
+        page.addWidget(self._next_pane, 1)
         self._stack = QStackedWidget()
         self._stack.addWidget(self._waiting)
-        self._stack.addWidget(self._connected)
+        self._stack.addWidget(self._connected_page)
 
         root = QWidget()
+        self._local_pane = LocalPane(os.path.expanduser("~"))
         row = QHBoxLayout(root)
-        row.addWidget(self._pane(tr("Local"), QLabel()))
+        row.addWidget(self._pane(tr("Local"), self._local_pane))
         row.addWidget(self._pane(tr("Next"), self._stack))
         self.setCentralWidget(root)
         self.resize(900, 500)
@@ -65,6 +72,7 @@ class MainWindow(QMainWindow):
         self._show_waiting()
         self._bridge = ListenerBridge(listener)
         self._bridge.session_started.connect(self._show_connected)
+        self._bridge.session_ready.connect(self._next_pane.bind)
         self._bridge.session_ended.connect(self._show_waiting)
 
     @staticmethod
@@ -78,6 +86,7 @@ class MainWindow(QMainWindow):
         return box
 
     def _show_waiting(self) -> None:
+        self._next_pane.unbind()
         lines = [tr("Waiting for a Next"), ""]
         for name, ip in self._local_addresses():
             lines.append(f"{name}: {ip}")
@@ -95,15 +104,21 @@ class MainWindow(QMainWindow):
         self._connected.setText(
             f'<span style="color:#2ecc40">\u25cf</span> {tr("Connected")} \u2014 {address}'
         )
-        self._stack.setCurrentWidget(self._connected)
+        self._stack.setCurrentWidget(self._connected_page)
 
     # -- observation points for tests
     def next_pane_state(self) -> str:
         return "waiting" if self._stack.currentWidget() is self._waiting else "connected"
 
     def next_pane_text(self) -> str:
-        return self._stack.currentWidget().text()
+        widget = self._waiting if self.next_pane_state() == "waiting" else self._connected
+        return widget.text()
+
+    def next_pane(self) -> NextPane:
+        return self._next_pane
 
     def closeEvent(self, event) -> None:
         self._bridge.stop()
+        self._local_pane.shutdown()
+        self._next_pane.shutdown()
         super().closeEvent(event)

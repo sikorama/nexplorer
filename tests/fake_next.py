@@ -32,6 +32,10 @@ class FakeNext:
         ident_payload: bytes | None = None,
         corrupt_replies: int = 0,
         bad_header_total: int | None = None,
+        fs: dict[str, bytes | None] | None = None,
+        drives: str = "CM",
+        current_drive: str = "C",
+        free_blocks: dict[str, int] | None = None,
     ):
         """`ignores`: opcodes an older dot does not know (silently ignored).
         `drops_on`: opcodes on which the link dies mid-command.
@@ -39,13 +43,19 @@ class FakeNext:
         `corrupt_replies`: how many reply blocks go out with a bad checksum
         (the Next then resends it on `Resend`). `bad_header_total`: send a
         header announcing that total length instead of a real reply.
-        `commands`: opcodes received, in order (idle `I` excluded)."""
+        `fs`: the Next's files, full path (lower case, drive-prefixed) to its
+        content, or to None for a folder. `drives`, `current_drive`: what `W` answers. `free_blocks`: free
+        512-byte blocks per drive letter for `Z` (others answer `F`). `commands`: opcodes received, in order (idle `I` excluded)."""
         self.host, self.port, self.version = host, port, version
         self.ignores, self.drops_on, self.poll_interval = ignores, drops_on, poll_interval
         self.commands: list[bytes] = []
         self.resends = 0  # `Resend` requests received from the Listener
         self.ident_payload, self.corrupt_replies = ident_payload, corrupt_replies
         self.bad_header_total = bad_header_total
+        self.drives, self.current_drive = drives, current_drive
+        self.free_blocks = {k.upper(): v for k, v in (free_blocks or {}).items()}
+        self.max_listing_block = 0  # largest `D` listing block sent, in bytes
+        self.fs = {k.lower(): v for k, v in (fs or {}).items()}
         self.sock: socket.socket | None = None
         self.handshake_reply: bytes = b""
         self.ended = threading.Event()
@@ -133,6 +143,16 @@ class FakeNext:
                         if self.ident_payload is not None
                         else b"O" + b"sync\x00" + self.version.encode()
                     )
+                elif op == b"L":
+                    self._list(arg.decode("ascii"))
+                elif op == b"W":
+                    self._push_status(b"O" + self.current_drive.encode() + self.drives.encode())
+                elif op == b"Z":
+                    drive = (arg.decode("ascii") or self.current_drive).upper()
+                    if drive in self.free_blocks:
+                        self._push_status(b"O" + self.free_blocks[drive].to_bytes(4, "little"))
+                    else:
+                        self._push_status(b"F")
                 elif op == b"Q":
                     self.sock.close()
                     self.ended.set()
@@ -151,3 +171,29 @@ class FakeNext:
             if answer != b"Resend":
                 return
             self.resends += 1
+
+    def _list(self, path: str) -> None:
+        folder = path.lower().rstrip("/")
+        is_root = len(folder) == 2 and folder[1] == ":"
+        if not is_root and self.fs.get(folder, b"") is not None:
+            self._push_status(b"F")
+            return
+        blocks: list[bytes] = []
+        packed = b""
+        for full, content in self.fs.items():
+            parent, _, name = full.rpartition("/")
+            if parent != folder:
+                continue
+            raw = name.encode("ascii")
+            size = 0 if content is None else len(content)
+            entry = bytes([content is None]) + size.to_bytes(4, "little") + bytes([len(raw)]) + raw
+            if packed and len(packed) + len(entry) > 1000:  # the dot's block limit
+                blocks.append(b"D" + packed)
+                packed = b""
+            packed += entry
+        if packed:
+            blocks.append(b"D" + packed)
+        for block in blocks:
+            self.max_listing_block = max(self.max_listing_block, len(block))
+            self._push_status(block)
+        self._push_status(b"E")

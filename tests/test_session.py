@@ -2,7 +2,7 @@ import time
 
 import pytest
 
-from nexplorer.protocol import Listener
+from nexplorer.protocol import Listener, RemoteError
 from tests.fake_next import FakeNext
 
 
@@ -148,3 +148,76 @@ def test_reply_with_impossible_length_ends_the_session(listener, total):
     with pytest.raises(ConnectionError):
         session.dot_version(timeout=2)
     assert session.wait_closed(timeout=2)
+
+
+def _session_with(listener, **fake_kwargs):
+    nxt = FakeNext(listener.port, **fake_kwargs)
+    nxt.connect()
+    return nxt, listener.wait_session(timeout=2)
+
+
+def test_list_dir_returns_folders_and_files_with_sizes(listener):
+    nxt, session = _session_with(
+        listener,
+        fs={
+            "c:/games": None,
+            "c:/games/manic.tap": b"x" * 300,
+            "c:/games/sub": None,
+            "c:/readme.txt": b"hello",
+            "m:/tmp.bin": b"zz",
+        },
+    )
+    entries = session.list_dir("c:/games", timeout=2)
+    assert sorted((e.name, e.is_dir, e.size) for e in entries) == [
+        ("manic.tap", False, 300),
+        ("sub", True, 0),
+    ]
+    nxt.drop()
+
+
+def test_list_dir_of_a_large_folder_returns_every_entry(listener):
+    files = {f"c:/big/file-number-{i:04d}.tap": b"x" * i for i in range(150)}
+    nxt, session = _session_with(listener, fs={"c:/big": None, **files})
+    entries = session.list_dir("c:/big", timeout=5)
+    assert sorted((e.name, e.size) for e in entries) == sorted(
+        (path.rsplit("/", 1)[1], len(data)) for path, data in files.items()
+    )
+    assert nxt.max_listing_block <= 1001  # the dot starts a new D block past 1000 bytes
+    nxt.drop()
+
+
+def test_list_dir_of_a_missing_folder_fails_and_the_session_stays_usable(listener):
+    nxt, session = _session_with(listener, fs={"c:/a.txt": b"1"})
+    with pytest.raises(RemoteError):
+        session.list_dir("c:/nope", timeout=2)
+    assert [e.name for e in session.list_dir("c:/", timeout=2)] == ["a.txt"]
+    nxt.drop()
+
+
+def test_list_dir_of_an_empty_folder_is_empty(listener):
+    nxt, session = _session_with(listener, fs={"c:/empty": None})
+    assert session.list_dir("c:/empty", timeout=2) == []
+    nxt.drop()
+
+
+def test_drives_reports_current_drive_and_letters(listener):
+    nxt, session = _session_with(listener, drives="CM", current_drive="C")
+    info = session.drives(timeout=2)
+    assert info.current == "C"
+    assert info.letters == ["C", "M"]
+    nxt.drop()
+
+
+def test_free_space_is_in_bytes_for_a_given_drive(listener):
+    nxt, session = _session_with(listener, free_blocks={"C": 2048, "M": 10})
+    assert session.free_space("C", timeout=2) == 2048 * 512
+    assert session.free_space("M", timeout=2) == 10 * 512
+    nxt.drop()
+
+
+def test_free_space_of_an_unmeasurable_drive_fails(listener):
+    nxt, session = _session_with(listener, free_blocks={"C": 1})
+    with pytest.raises(RemoteError):
+        session.free_space("M", timeout=2)
+    nxt.drop()
+

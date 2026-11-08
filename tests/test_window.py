@@ -8,6 +8,7 @@ from PySide6.QtWidgets import QApplication
 
 from nexplorer.protocol import Listener
 from nexplorer.ui.main_window import MainWindow
+from tests.conftest import dispose
 from tests.fake_next import FakeNext
 
 
@@ -34,6 +35,7 @@ def window(app):
     w.show()
     yield w, listener
     w.close()
+    dispose(app, w)
     listener.stop()
 
 
@@ -70,3 +72,68 @@ def test_next_replacing_a_dropped_one_leaves_the_pane_connected(app, window):
     pump(app, lambda: False, timeout=1.0)
     assert w.next_pane_state() == "connected"
     second.drop()
+
+
+FS = {
+    "c:/games": None,
+    "c:/games/manic.tap": b"x" * 300,
+    "c:/readme.txt": b"hello",
+    "m:/tmp.bin": b"zz",
+}
+
+
+def connect_next(app, w, listener, **kwargs):
+    nxt = FakeNext(listener.port, fs=FS, free_blocks={"C": 2048, "M": 10}, **kwargs)
+    nxt.connect()
+    assert pump(app, lambda: w.next_pane_state() == "connected")
+    return nxt
+
+
+def test_next_pane_lists_the_root_of_the_current_drive_once_connected(app, window):
+    w, listener = window
+    nxt = connect_next(app, w, listener)
+    assert pump(app, lambda: w.next_pane().names() == ["games", "readme.txt"])
+    assert w.next_pane().path() == "c:/"
+    nxt.drop()
+
+
+def test_next_pane_enters_folders_goes_up_and_takes_a_typed_path(app, window):
+    w, listener = window
+    nxt = connect_next(app, w, listener)
+    pane = w.next_pane()
+    assert pump(app, lambda: "games" in pane.names())
+    pane.enter("games")
+    assert pump(app, lambda: pane.names() == ["manic.tap"])
+    assert pane.path() == "c:/games"
+    pane.go_up()
+    assert pump(app, lambda: pane.path() == "c:/")
+    pane.go_to("c:/games")
+    assert pump(app, lambda: pane.names() == ["manic.tap"])
+    pane.go_to("c:/nope")
+    assert pump(app, lambda: pane.error() != "")
+    assert pane.path() == "c:/games"
+    nxt.drop()
+
+
+def test_next_pane_switches_drive_and_shows_free_space(app, window):
+    w, listener = window
+    nxt = connect_next(app, w, listener)
+    pane = w.next_pane()
+    assert pump(app, lambda: pane.drives() == ["C", "M"] and pane.free_space_text() != "")
+    assert pane.free_space_text() == "1.0 MB free"
+    pane.switch_drive("M")
+    assert pump(app, lambda: pane.names() == ["tmp.bin"])
+    assert pane.path() == "m:/"
+    assert pump(app, lambda: pane.free_space_text() == "5.0 KB free")
+    nxt.drop()
+
+
+def test_next_pane_goes_back_to_waiting_and_clears_when_the_session_ends(app, window):
+    w, listener = window
+    nxt = connect_next(app, w, listener)
+    assert pump(app, lambda: w.next_pane().names() != [])
+    nxt.drop()
+    assert pump(app, lambda: w.next_pane_state() == "waiting")
+    nxt2 = connect_next(app, w, listener)
+    assert pump(app, lambda: w.next_pane().names() == ["games", "readme.txt"])
+    nxt2.drop()
