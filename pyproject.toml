@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "nexplorer"
+version = "0.1.0"
+description = "Minimal desktop file manager for a ZX Spectrum Next, over Wi-Fi via .sync5"
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.10"
+dependencies = ["PySide6"]
+
+[project.optional-dependencies]
+dev = ["pytest"]
+
+[project.scripts]
+nexplorer = "nexplorer.__main__:main"
+
+[tool.setuptools]
+packages = ["nexplorer"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
