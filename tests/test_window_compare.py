@@ -176,3 +176,72 @@ def test_verify_settles_the_unverified_rows_through_the_next_crc_and_only_when_a
         assert (states["same.tap"], states["other.tap"], states["clash.tap"]) == ("identical", "different", "different")
         assert nxt.commands.count(b"K") == 2
         nxt.drop()
+
+
+def settled(app, w):
+    assert pump(app, lambda: w.operation_running())
+    assert pump(app, lambda: not w.operation_running(), timeout=10)
+
+
+def test_a_nested_row_goes_between_its_own_folders_and_a_folder_row_alone_moves_nothing_below_it(app, tmp_path):
+    path = nested_local(tmp_path)
+    (tmp_path / "local" / "games" / "new.tap").write_bytes(b"new")
+    with opened(app, path) as (w, listener):
+        nxt = prepare(app, w, listener, tmp_path, {**TREE_FS, "c:/dest/games/fromnext.tap": b"fn"})
+        w.compare()
+        w.compare_expand("games")
+        assert pump(app, lambda: not w.operation_running(), timeout=10)
+
+        w.compare_transfer("games")  # a folder row on its own: its children stay out
+        pump(app, lambda: w.operation_running(), timeout=0.5)
+        assert pump(app, lambda: not w.operation_running(), timeout=10)
+        assert "c:/dest/games/new.tap" not in nxt.fs and not (tmp_path / "local" / "games" / "fromnext.tap").exists()
+
+        w.compare_transfer("games/new.tap")
+        settled(app, w)
+        assert nxt.fs["c:/dest/games/new.tap"] == b"new"
+        assert "c:/dest/new.tap" not in nxt.fs
+
+        w.compare_apply()
+        settled(app, w)
+        assert (tmp_path / "local" / "games" / "fromnext.tap").read_bytes() == b"fn"
+        assert not (tmp_path / "local" / "fromnext.tap").exists()
+        nxt.drop()
+
+
+def test_rows_are_recomputed_after_apply_so_a_second_apply_sends_nothing_and_expanded_folders_stay(app, tmp_path):
+    path = nested_local(tmp_path)
+    with opened(app, path) as (w, listener):
+        nxt = prepare(app, w, listener, tmp_path, TREE_FS)
+        w.compare()
+        w.compare_expand("games")
+        assert pump(app, lambda: not w.operation_running(), timeout=10)
+
+        w.compare_apply()
+        settled(app, w)
+
+        states = dict(w.compare_states())
+        assert states["up.tap"] == states["down.tap"] == "unverified"
+        assert "games/a.tap" in states  # still expanded
+        nxt.commands.clear()
+        w.compare_apply()
+        pump(app, lambda: w.operation_running(), timeout=0.5)
+        assert pump(app, lambda: not w.operation_running(), timeout=10)
+        assert not {b"P", b"G"} & set(nxt.commands)
+        nxt.drop()
+
+
+def test_verify_settles_nested_rows_and_state_texts_include_them(app, tmp_path):
+    path = nested_local(tmp_path)
+    with opened(app, path) as (w, listener):
+        nxt = prepare(app, w, listener, tmp_path, {**TREE_FS, "c:/dest/games/deep/z.tap": b"z"})
+        w.compare()
+        w.compare_expand("games")
+        assert pump(app, lambda: not w.operation_running(), timeout=10)
+        w.compare_verify()
+        settled(app, w)
+        states = dict(w.compare_states())
+        assert states["games/a.tap"] == "identical"
+        texts = w.compare_state_texts()
+        assert {"games", "games/a.tap", "games/deep", "up.tap"} <= set(texts)
+        nxt.drop()

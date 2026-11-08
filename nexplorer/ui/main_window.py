@@ -37,9 +37,10 @@ from nexplorer.compare import (
     read_ignore,
     expand as expand_row,
     scan_all,
+    recompare,
     verify as verify_rows,
 )
-from nexplorer.protocol import Listener
+from nexplorer.protocol import Listener, RemoteError
 from nexplorer.transfer import Result, copy, is_plain_name, make_folder, move, receive, remove, rename, send
 from nexplorer.settings import Settings
 from nexplorer.ui.bridge import ListenerBridge
@@ -65,8 +66,9 @@ def local_ipv4_addresses() -> list[tuple[str, str]]:
 
 
 def _one_row(row):
-    """The row as if it were checked: a single transfer ignores the checkbox."""
-    return replace(row, checked=True)
+    """The row as if it were checked: a single transfer ignores the checkbox. A folder row
+    goes alone, without the rows below it."""
+    return replace(row, checked=True, children=None)
 
 
 def _ask_name_dialog(title: str, initial: str = "") -> str | None:
@@ -226,6 +228,7 @@ class MainWindow(QMainWindow):
         self._dot_notice.setTextFormat(Qt.PlainText)
         self._dot_notice.hide()
         self._capabilities = Capabilities()
+        self._fresh_rows = None  # compared rows recomputed by a transfer, shown when it ends
         self._version_known = False
         self._op_row.hide()
         self._busy = False
@@ -270,6 +273,7 @@ class MainWindow(QMainWindow):
         self._bridge.session_ready.connect(self._next_pane.bind)
         self._bridge.session_ready.connect(lambda _s: self._update_actions())
         self._bridge.dot_version.connect(self._on_dot_version)
+        self._bridge.dot_unanswered.connect(self._on_dot_unanswered)
         self._bridge.session_ended.connect(self._show_waiting)
 
     @staticmethod
@@ -290,6 +294,14 @@ class MainWindow(QMainWindow):
         text = tr("The dot on the Next is too old for some actions: update .sync5 to version") + f" {MINIMUM_DOT}"
         self._dot_notice.setText(text if missing else "")
         self._dot_notice.setVisible(missing)
+        self._update_actions()
+
+    def _on_dot_unanswered(self) -> None:
+        """`Y` got no answer in time: the dot is not proven old, so nothing is greyed."""
+        self._capabilities = Capabilities()
+        self._version_known = True
+        self._dot_notice.setText("")
+        self._dot_notice.hide()
         self._update_actions()
 
     def _show_waiting(self) -> None:
@@ -455,11 +467,16 @@ class MainWindow(QMainWindow):
     def compare_transfer(self, name: str) -> None:
         """Transfer one row on its own, whatever its checkbox."""
         row = self._compare_view.row(name)
-        self._apply_rows([_one_row(row)])
+        *parents, _ = name.split("/")
+        local_dir, next_dir = self._local_pane.path(), self._next_pane.path()
+        if local_dir and next_dir:
+            self._apply_rows(
+                [_one_row(row)], os.path.join(local_dir, *parents), "/".join([next_dir.rstrip("/"), *parents])
+            )
 
     def compare_apply(self) -> None:
         """Transfer every checked row, one after the other."""
-        self._apply_rows(self._compare_view.rows())
+        self._apply_rows(self._compare_view.rows(), self._local_pane.path(), self._next_pane.path())
 
     def compare_verify(self) -> None:
         """Ask the Next for the CRC-32 of the same-size files and settle their rows."""
@@ -469,16 +486,24 @@ class MainWindow(QMainWindow):
         if session and local_dir and next_dir and self._capabilities.crc:
             self._run(lambda _progress, cancel: verify_rows(session, local_dir, next_dir, rows, cancel))
 
-    def _apply_rows(self, rows: list) -> None:
+    def _apply_rows(self, rows: list, local_dir: str, next_dir: str) -> None:
+        """Transfer `rows`, which live in the given folders, then recompute the compared rows."""
         session = self._next_pane.session()
-        local_dir, next_dir = self._local_pane.path(), self._next_pane.path()
+        top_local, top_next = self._local_pane.path(), self._next_pane.path()
         verify = self._settings.crc_after_upload and self._capabilities.crc
-        if session and local_dir and next_dir:
-            self._run(
-                lambda progress, cancel: apply_rows(
-                    session, local_dir, next_dir, rows, progress, cancel, verify_crc=verify
-                )
-            )
+        hidden, ignore = self._settings.show_hidden, read_ignore(top_local) if top_local else []
+        shown = self._compare_view.rows()
+        if session and local_dir and next_dir and top_local and top_next:
+
+            def work(progress, cancel):
+                result = apply_rows(session, local_dir, next_dir, rows, progress, cancel, verify_crc=verify)
+                try:
+                    self._fresh_rows = recompare(session, shown, top_local, top_next, hidden, ignore)
+                except (OSError, RemoteError, ConnectionError, TimeoutError):
+                    pass  # the rows stay as they were
+                return result
+
+            self._run(work)
 
     def compare_expand(self, path: str) -> None:
         """List the next level of a not scanned folder, given as a path from the compared folders."""
@@ -611,6 +636,9 @@ class MainWindow(QMainWindow):
             self._summary.setText(f"{tr('Failed')}: {outcome}")
         self._next_pane.reload()
         self._local_pane.reload()
+        if self._fresh_rows is not None:
+            self._compare_view.set_rows(self._fresh_rows)
+            self._fresh_rows = None
         self._compare_view.refresh()
         self._update_actions()
 

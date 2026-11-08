@@ -87,11 +87,16 @@ def compare_level(
     remote_by_name = {e.name.casefold(): e for e in remote}
     local_names = {e.name.casefold() for e in local}
     case_count = Counter(e.name.casefold() for e in local)
+    remote_count = Counter(e.name.casefold() for e in remote)
     rows = []
     for e in local:
         other = remote_by_name.get(e.name.casefold())
         blocked = _blocked(e.name, next_dir, ignore, show_hidden)
-        if blocked != "invalid" and case_count[e.name.casefold()] > 1:
+        if blocked != "invalid" and (
+            case_count[e.name.casefold()] > 1
+            or remote_count[e.name.casefold()] > 1
+            or (other is not None and other.is_dir != e.is_dir)
+        ):
             blocked = "conflict"
         if blocked:
             rows.append(Row(e.name, blocked, None, False, e, other))
@@ -104,9 +109,11 @@ def compare_level(
         else:
             rows.append(Row(e.name, "unverified", None, False, e, other))
     for e in remote:
-        if e.name.casefold() in local_names:
+        if e.name.casefold() in local_names and remote_count[e.name.casefold()] == 1:
             continue
         blocked = _blocked(e.name, next_dir, ignore, show_hidden)
+        if blocked != "invalid" and remote_count[e.name.casefold()] > 1:
+            blocked = "conflict"
         rows.append(Row(e.name, blocked or "only-next", None if blocked else "to-local", not blocked, None, e))
     return rows
 
@@ -119,8 +126,11 @@ def _list_local(path: str) -> list[Entry]:
     entries = []
     with os.scandir(path) as it:
         for e in it:
-            is_dir = e.is_dir()
-            entries.append(Entry(e.name, is_dir, 0 if is_dir else e.stat().st_size))
+            try:
+                is_dir = e.is_dir()
+                entries.append(Entry(e.name, is_dir, 0 if is_dir else e.stat().st_size))
+            except OSError:  # dangling symlink, file gone meanwhile: not comparable, left out
+                continue
     return entries
 
 
@@ -156,7 +166,37 @@ def expand(
     row.children = compare_level(
         _list_local(os.path.join(local_dir, row.name)), session.list_dir(child_next), child_next, ignore, show_hidden
     )
+    row.checked = True  # unchecking the folder afterwards leaves its whole content out of Apply
     settle(row)
+
+
+def recompare(
+    session: Session,
+    rows: list[Row],
+    local_dir: str,
+    next_dir: str,
+    show_hidden: bool = True,
+    ignore: list[str] = (),
+) -> list[Row]:
+    """The rows of the same folders listed afresh (after a transfer), expanded folders kept expanded.
+
+    A file verified identical stays identical while neither side changed."""
+    fresh = compare_level(_list_local(local_dir), session.list_dir(next_dir), next_dir, ignore, show_hidden)
+    old = {r.name: r for r in rows}
+    for r in fresh:
+        before = old.get(r.name)
+        if before is None:
+            continue
+        if before.children is not None and r.state == "not-scanned":
+            r.checked = before.checked
+            r.children = recompare(
+                session, before.children, os.path.join(local_dir, r.name), _join_next(next_dir, r.name),
+                show_hidden, ignore,
+            )
+            settle(r)
+        elif before.state == "identical" and r.state == "unverified" and (before.local, before.remote) == (r.local, r.remote):
+            r.state = "identical"
+    return fresh
 
 
 def scan_all(
@@ -213,6 +253,8 @@ def apply(
     total = Result()
     for r in rows:
         if r.children is not None:
+            if not r.checked:
+                continue
             sub = apply(
                 session, os.path.join(local_dir, r.name), _join_next(next_dir, r.name),
                 r.children, progress, cancel, verify_crc,
@@ -252,12 +294,23 @@ def verify(
     be read stays unverified; a lost Session stops the run."""
     total = Result()
     for r in rows:
+        if r.children is not None:
+            sub = verify(
+                session, os.path.join(local_dir, r.local.name), _join_next(next_dir, r.remote.name),
+                r.children, cancel, timeout,
+            )
+            settle(r)
+            total.failures += sub.failures
+            if sub.cancelled or sub.dropped:
+                total.cancelled, total.dropped = sub.cancelled, sub.dropped
+                break
+            continue
         if r.state != "unverified" or r.remote is None or r.remote.is_dir:
             continue
         if cancel and cancel():
             total.cancelled = True
             break
-        target = next_dir.rstrip("/") + "/" + r.name
+        target = _join_next(next_dir, r.remote.name)
         try:
             expected = 0
             with open(os.path.join(local_dir, r.name), "rb") as f:

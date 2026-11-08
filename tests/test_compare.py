@@ -215,3 +215,19 @@ def test_verify_asks_the_next_for_the_crc_of_same_size_files_only_and_settles_ea
         ("size.tap", "different"),
     ]
     nxt.drop()
+
+
+def test_two_next_entries_differing_only_by_case_are_conflict_rows_never_transferred():
+    rows = compare_level([], [Entry("a.tap", False, 1), Entry("A.TAP", False, 2)])
+    assert [(r.name, r.state, r.transferable()) for r in rows] == [
+        ("a.tap", "conflict", False),
+        ("A.TAP", "conflict", False),
+    ]
+
+
+def test_a_folder_against_a_file_of_the_same_name_is_a_conflict_not_a_size_difference():
+    rows = compare_level([Entry("x", True, 0), Entry("y", False, 0)], [Entry("x", False, 0), Entry("y", True, 0)])
+    assert [(r.name, r.state, r.checked, r.transferable()) for r in rows] == [
+        ("x", "conflict", False, False),
+        ("y", "conflict", False, False),
+    ]
