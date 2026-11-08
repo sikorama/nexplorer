@@ -47,5 +47,9 @@
   "Transfer this file": "Transférer ce fichier",
   "Apply": "Appliquer",
   "Verify": "Vérifier",
-  "Back to the panes": "Retour aux volets"
+  "Back to the panes": "Retour aux volets",
+  "Conflict": "Conflit",
+  "Invalid": "Invalide",
+  "Ignored": "Ignoré",
+  "Hidden": "Masqué"
 }

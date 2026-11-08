@@ -74,6 +74,48 @@ def test_apply_transfers_the_checked_rows_and_a_single_row_can_go_alone(app, tmp
         nxt.drop()
 
 
+def naming_folder(tmp_path, show_hidden):
+    folder = tmp_path / "local"
+    folder.mkdir()
+    for name in ("ok.tap", "a.tap", "A.TAP", "bad?.tap", "junk.bak", ".git"):
+        (folder / name).write_bytes(b"x")
+    (folder / ".nexplorerignore").write_text("*.bak\n")
+    path = tmp_path / "settings.json"
+    save(Settings(local_folder=str(folder), show_hidden=show_hidden), path)
+    return path
+
+
+def test_compare_shows_conflict_invalid_ignored_and_hidden_rows_and_transfers_none_of_them(app, tmp_path):
+    path = naming_folder(tmp_path, show_hidden=False)
+    with opened(app, path) as (w, listener):
+        nxt = prepare(app, w, listener, tmp_path, {})
+        w.compare()
+        assert w.compare_state_texts() == {
+            ".git": "Hidden",
+            ".nexplorerignore": "Hidden",
+            "A.TAP": "Conflict",
+            "a.tap": "Conflict",
+            "bad?.tap": "Invalid",
+            "junk.bak": "Ignored",
+            "ok.tap": "Only on Local",
+        }
+        w.compare_apply()
+        assert pump(app, lambda: w.operation_running())
+        assert pump(app, lambda: not w.operation_running(), timeout=10)
+        assert set(nxt.fs) == {"c:/dest", "c:/dest/ok.tap"}
+        nxt.drop()
+
+
+def test_the_hidden_files_setting_offers_hidden_entries_for_transfer(app, tmp_path):
+    path = naming_folder(tmp_path, show_hidden=True)
+    with opened(app, path) as (w, listener):
+        nxt = prepare(app, w, listener, tmp_path, {})
+        w.compare()
+        texts = w.compare_state_texts()
+        assert texts[".git"] == "Only on Local" and texts[".nexplorerignore"] == "Only on Local"
+        nxt.drop()
+
+
 def test_compare_needs_a_session(app, tmp_path):
     path = local_folder(tmp_path)
     with opened(app, path) as (w, _):
