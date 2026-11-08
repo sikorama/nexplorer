@@ -1,7 +1,7 @@
 """Compare below one level: not scanned folders, expansion on demand, Scan all."""
 import pytest
 
-from nexplorer.compare import apply, compare_level, expand, scan_all
+from nexplorer.compare import apply, compare_level, expand, recompare, scan_all, verify
 from nexplorer.protocol import Entry, Listener
 from tests.fake_next import FakeNext
 
@@ -138,4 +138,82 @@ def test_an_expanded_level_applies_the_naming_rules_and_is_never_transferred_whe
     apply(session, str(tmp_path), "d:/dest", rows)
     assert set(nxt.fs) & {"d:/dest/games/bad?.tap", "d:/dest/games/junk.bak", "d:/dest/games/.hid"} == set()
     assert nxt.fs["d:/dest/games/up.tap"] == b"up"
+    nxt.drop()
+
+
+def test_an_unchecked_folder_row_means_none_of_its_children_is_applied_even_when_they_are_checked(listener, tmp_path):
+    nxt, session = _session_with(listener, _tree(tmp_path))
+    rows = _top(tmp_path)
+    expand(session, row(rows, "games"), str(tmp_path), "d:/dest")
+    assert row(rows, "games").checked  # expanding proposes the folder's content
+    row(rows, "games").checked = False
+    row(rows, "top.tap").checked = False
+
+    apply(session, str(tmp_path), "d:/dest", rows)
+
+    assert "d:/dest/games/up.tap" not in nxt.fs and not (tmp_path / "games" / "down.tap").exists()
+    nxt.drop()
+
+
+def test_expanding_skips_an_entry_whose_stat_fails_such_as_a_dangling_symlink(listener, tmp_path):
+    nxt, session = _session_with(listener, _tree(tmp_path))
+    (tmp_path / "games" / "dangling").symlink_to(tmp_path / "nowhere")
+    rows = _top(tmp_path)
+
+    expand(session, row(rows, "games"), str(tmp_path), "d:/dest")
+
+    names = {r.name for r in row(rows, "games").children}
+    assert "up.tap" in names and "dangling" not in names
+    nxt.drop()
+
+
+def test_verify_descends_into_expanded_folders_and_settles_the_folder_rows(listener, tmp_path):
+    (tmp_path / "games").mkdir()
+    (tmp_path / "games" / "ok.bin").write_bytes(b"abcd")
+    (tmp_path / "games" / "bad.bin").write_bytes(b"abcd")
+    (tmp_path / "ok").mkdir()
+    (tmp_path / "ok" / "Foo.TXT").write_bytes(b"abcd")
+    nxt, session = _session_with(
+        listener,
+        {
+            "d:/dest": None,
+            "d:/dest/games": None,
+            "d:/dest/games/ok.bin": b"abcd",
+            "d:/dest/games/bad.bin": b"abce",
+            "d:/dest/ok": None,
+            "d:/dest/ok/foo.txt": b"abcd",
+        },
+    )
+    local = [Entry(p.name, True, 0) for p in sorted(tmp_path.iterdir())]
+    rows = compare_level(local, [Entry("games", True, 0), Entry("ok", True, 0)])
+    for name in ("games", "ok"):
+        expand(session, row(rows, name), str(tmp_path), "d:/dest")
+
+    result = verify(session, str(tmp_path), "d:/dest", rows)
+
+    assert result.failures == []
+    assert {c.name: c.state for c in row(rows, "games").children} == {"ok.bin": "identical", "bad.bin": "different"}
+    assert row(rows, "games").state == "different"
+    assert row(rows, "ok").state == "identical"
+    nxt.drop()
+
+
+def test_recompare_after_apply_shows_what_is_left_keeps_expanded_folders_and_a_second_apply_sends_nothing(
+    listener, tmp_path
+):
+    nxt, session = _session_with(listener, _tree(tmp_path))
+    rows = _top(tmp_path)
+    expand(session, row(rows, "games"), str(tmp_path), "d:/dest")
+    apply(session, str(tmp_path), "d:/dest", rows)
+
+    fresh = recompare(session, rows, str(tmp_path), "d:/dest")
+
+    games = row(fresh, "games")
+    assert games.children is not None  # still expanded
+    assert row(games.children, "up.tap").state == "unverified"
+    assert row(games.children, "down.tap").state == "unverified"
+    assert row(fresh, "top.tap").state == "unverified"
+    nxt.commands.clear()
+    apply(session, str(tmp_path), "d:/dest", fresh)
+    assert not {b"P", b"G"} & set(nxt.commands)
     nxt.drop()

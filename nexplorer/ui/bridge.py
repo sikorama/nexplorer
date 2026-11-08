@@ -11,7 +11,8 @@ from nexplorer.protocol import Listener
 class ListenerBridge(QObject):
     session_started = Signal(str)  # Next's address
     session_ready = Signal(object)  # the Session itself
-    dot_version = Signal(str)
+    dot_version = Signal(str)  # "": the dot is too old to answer `Y`
+    dot_unanswered = Signal()  # `Y` failed (timeout, lost link): nothing proves the dot old
     session_ended = Signal()
 
     def __init__(self, listener: Listener):
@@ -33,8 +34,9 @@ class ListenerBridge(QObject):
             try:
                 version = session.dot_version(timeout=30)
             except (ConnectionError, TimeoutError):
-                version = None
-            self._emit(self.dot_version, "" if version is None else version)  # "": no answer to `Y`
+                self._emit(self.dot_unanswered)
+            else:
+                self._emit(self.dot_version, "" if version is None else version)
             while not self._stop and not session.wait_closed(timeout=0.2):
                 pass
             self._emit(self.session_ended)

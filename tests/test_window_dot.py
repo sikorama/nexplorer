@@ -1,4 +1,5 @@
 import os
+import time
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -84,3 +85,47 @@ def test_nothing_is_ever_sent_to_update_the_dot(app, tmp_path):
         assert pump(app, lambda: "5.9.2" in w.dot_notice())
         assert b"U" not in nxt.commands and set(nxt.commands) <= {b"Y", b"L", b"W", b"Z"}
         nxt.drop()
+
+
+class _Silent:
+    """A Session whose `Y` fails the way a slow or broken link does."""
+
+    peer_address = "1.2.3.4"
+
+    def __init__(self, error):
+        self.error = error
+
+    def dot_version(self, timeout=None):
+        raise self.error
+
+    def wait_closed(self, timeout=None):
+        return True
+
+
+class _OneSession:
+    def __init__(self, session):
+        self.session = session
+
+    def wait_session(self, timeout=None):
+        time.sleep(0.2)  # the test connects its slots first
+        session, self.session = self.session, None
+        return session
+
+
+def test_a_failed_or_slow_y_is_not_reported_as_an_old_dot(app):
+    from nexplorer.ui.bridge import ListenerBridge
+
+    for error in (TimeoutError("no reply"), ConnectionError("lost")):
+        bridge = ListenerBridge(_OneSession(_Silent(error)))
+        got = []
+        bridge.dot_version.connect(lambda v: got.append(("version", v)))
+        bridge.dot_unanswered.connect(lambda: got.append(("unanswered", None)))
+        assert pump(app, lambda: bool(got))
+        bridge.stop()
+        assert got == [("unanswered", None)]
+
+
+def test_an_unanswered_y_greys_nothing_and_shows_no_old_dot_notice(app, tmp_path):
+    with opened(app, settings_file(tmp_path)) as (w, listener):
+        w._bridge.dot_unanswered.emit()
+        assert pump(app, lambda: w.dot_version_known()) and w.dot_notice() == ""

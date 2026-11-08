@@ -86,6 +86,11 @@ class CompareView(QWidget):
         self._rows = rows
         self._fill()
 
+    def set_rows(self, rows: list[Row]) -> None:
+        """Replace the rows (same folders, recomputed), keeping the expanded folders open."""
+        self._rows = rows
+        self._fill()
+
     def refresh(self) -> None:
         self._fill()
 
@@ -141,7 +146,14 @@ class CompareView(QWidget):
             item.setIcon(5, self.style().standardIcon(QStyle.SP_MessageBoxCritical))
 
     def state_texts(self) -> dict[str, str]:
-        return {r.name: self._tree.topLevelItem(i).text(5) for i, r in enumerate(self._rows)}
+        """The State column of every row shown, by path (nested rows included)."""
+        found = {}
+        stack = [self._tree.topLevelItem(i) for i in range(self._tree.topLevelItemCount())]
+        while stack:
+            item = stack.pop()
+            found[item.data(1, Qt.UserRole)] = item.text(5)
+            stack += [item.child(i) for i in range(item.childCount())]
+        return found
 
     def _on_item_changed(self, item: QTreeWidgetItem, _column: int) -> None:
         self.row(item.data(1, Qt.UserRole)).checked = item.checkState(0) == Qt.Checked
@@ -160,9 +172,6 @@ class CompareView(QWidget):
             found = next(r for r in rows if r.name == part)
             rows = found.children or []
         return found
-
-    def refresh(self) -> None:
-        self._fill()
 
     def rows(self) -> list[Row]:
         return self._rows
