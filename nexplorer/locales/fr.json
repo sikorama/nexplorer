@@ -45,5 +45,9 @@
   "Reverse direction": "Inverser le sens",
   "Transfer this file": "Transférer ce fichier",
   "Apply": "Appliquer",
-  "Back to the panes": "Retour aux volets"
+  "Back to the panes": "Retour aux volets",
+  "Conflict": "Conflit",
+  "Invalid": "Invalide",
+  "Ignored": "Ignoré",
+  "Hidden": "Masqué"
 }
