@@ -4,6 +4,7 @@ import sys
 from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import QApplication
 
+from nexplorer import settings
 from nexplorer.i18n import set_language, tr
 from nexplorer.protocol import Listener
 from nexplorer.ui.main_window import MainWindow
@@ -23,7 +24,8 @@ def close_on_signals(app: QApplication, window: MainWindow) -> QTimer:
 
 
 def main() -> int:
-    set_language("en")
+    path = settings.config_path()
+    set_language(settings.load(path).language)
     app = QApplication(sys.argv)
     listener = Listener(port=PORT)
     try:
@@ -31,7 +33,7 @@ def main() -> int:
     except OSError as e:
         print(f"{tr('Cannot listen on port')} {PORT}: {e}", file=sys.stderr)
         return 1
-    window = MainWindow(listener)
+    window = MainWindow(listener, settings_path=path)
     window.show()
     keep_alive = close_on_signals(app, window)  # noqa: F841 - the timer must stay referenced
     code = app.exec()

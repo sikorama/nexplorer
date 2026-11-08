@@ -163,6 +163,7 @@ class FolderPane(QWidget):
         self._path = path
         self._entries: list[Entry] = []
         self._sort = ("name", False)
+        self._show_hidden = False
         self._error = ""
         self._closed = False
 
@@ -241,6 +242,17 @@ class FolderPane(QWidget):
         self._sort = (key, descending)
         self._fill()
 
+    def sort(self) -> tuple[str, bool]:
+        return self._sort
+
+    def set_sort(self, sort: tuple[str, bool]) -> None:
+        self._sort = sort
+        self._fill()
+
+    def set_show_hidden(self, show: bool) -> None:
+        self._show_hidden = show
+        self._fill()
+
     def select(self, names: list[str]) -> None:
         self._tree.clearSelection()
         for i in range(self._tree.topLevelItemCount()):
@@ -280,6 +292,8 @@ class FolderPane(QWidget):
         self._tree.clear()
         by, descending = self._sort
         for e in sort_entries(self._entries, by, descending):
+            if e.name.startswith(".") and not self._show_hidden and e.name not in (".", ".."):
+                continue
             row = QTreeWidgetItem([e.name, "" if e.is_dir else format_size(e.size), type_label(e)])
             row.setData(0, Qt.UserRole, e.is_dir)
             self._tree.addTopLevelItem(row)
@@ -390,6 +404,8 @@ class NextPane(FolderPane):
         bar.addWidget(self._free, 1)
         self.layout().insertLayout(0, bar)
         self._drive = ""
+        self.preferred_path = ""  # folder to reopen on the next Session, if its drive is there
+        self._fallback = ""  # drive root to show if the preferred folder cannot be listed
 
     def bind(self, session: Session) -> None:
         """A Session opened: show the root of the Next's current drive."""
@@ -401,13 +417,20 @@ class NextPane(FolderPane):
                 drives = session.drives(timeout=30)
             except (ConnectionError, TimeoutError, RemoteError):
                 drives = None
-            free = self._measure(session, drives.current if drives else "")
+            free = self._measure(session, self._start_drive(drives) if drives else "")
             self._emit_info(session, drives, free)
 
         threading.Thread(target=work, daemon=True).start()
 
+    def _start_drive(self, drives) -> str:
+        """The drive to open: the one of the preferred folder if the Next has it, else the current one."""
+        wanted = self.preferred_path[:1].upper()
+        return wanted if self.preferred_path[1:2] == ":" and wanted in [d.upper() for d in drives.letters] else drives.current
+
     def unbind(self) -> None:
-        """The Session ended: forget everything about it."""
+        """The Session ended: forget everything about it (the folder shown is kept for the next one)."""
+        self.preferred_path = self._path or self.preferred_path
+        self._fallback = ""
         self._next.session = None
         self._next.allowed_drives = set()
         self._request += 1
@@ -459,12 +482,24 @@ class NextPane(FolderPane):
             self._next.allowed_drives = {letter.upper() for letter in drives.letters}
             self._drives.clear()
             self._drives.addItems(drives.letters)
-            self._drive = drives.current
-            self._drives.setCurrentText(drives.current)
-            self.load(f"{drives.current.lower()}:/")
+            self._drive = self._start_drive(drives)
+            root = f"{self._drive.lower()}:/"
+            start = self.preferred_path if self.preferred_path[:1].upper() == self._drive else root
+            self._fallback = root if start != root else ""
+            self._drives.setCurrentText(self._drive)
+            self.load(start)
         elif self._drive and self._drives.currentText() != self._drive:
             return
         self._free.setText(free)
+
+    def _on_loaded(self, request: int, path: str, entries: list, error: str) -> None:
+        if error and self._fallback and request == self._request:
+            root, self._fallback = self._fallback, ""
+            self.load(root)  # the remembered folder is gone: show the drive root instead
+            return
+        if request == self._request:
+            self._fallback = ""
+        super()._on_loaded(request, path, entries, error)
 
     def session(self) -> Session | None:
         return self._next.session

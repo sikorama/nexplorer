@@ -521,3 +521,23 @@ def test_copy_on_a_dot_that_ignores_the_opcode_raises_instead_of_crashing(listen
     with pytest.raises(RemoteError):
         session.copy("c:/a", "m:/a", timeout=2)
     nxt.drop()
+
+
+def test_crc_is_the_crc32_of_the_next_file(listener):
+    import zlib
+
+    nxt = FakeNext(listener.port, fs={"d:/a.bin": b"hello world"})
+    nxt.connect()
+    session = listener.wait_session(timeout=2)
+    assert session.crc("d:/a.bin", timeout=2) == zlib.crc32(b"hello world") == 0x0D4A1185
+    nxt.drop()
+
+
+def test_crc_of_a_missing_file_fails_and_the_session_stays_usable(listener):
+    nxt = FakeNext(listener.port, fs={"d:/a.bin": b"x"})
+    nxt.connect()
+    session = listener.wait_session(timeout=2)
+    with pytest.raises(RemoteError):
+        session.crc("d:/missing.bin", timeout=2)
+    assert session.crc("d:/a.bin", timeout=2) == 0x8CDC1683
+    nxt.drop()

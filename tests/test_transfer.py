@@ -581,3 +581,112 @@ def test_move_refuses_an_existing_name_a_folder_into_itself_and_the_same_folder(
     assert len(move(session, "c:/src", _entries(("note.txt", False, 4)), "c:/src").failures) == 1
     assert len(move(session, "c:/dst", _entries(("game", True, 0)), "c:/dst/game/sub").failures) == 1
     nxt.drop()
+
+
+def test_send_with_crc_check_reports_a_same_size_corruption_the_size_check_cannot_see(listener, tmp_path):
+    (tmp_path / "ok.bin").write_bytes(b"o" * 50)
+    (tmp_path / "bad.bin").write_bytes(b"b" * 50)
+    nxt, session = _session_with(listener, fs={"d:/dest": None}, corrupt_puts_of=("bad.bin",))
+
+    result = send(session, [str(tmp_path / "ok.bin"), str(tmp_path / "bad.bin")], "d:/dest", verify_crc=True)
+
+    assert [f.name for f in result.failures] == ["d:/dest/bad.bin"]
+    assert "CRC" in result.failures[0].reason
+    assert nxt.commands.count(b"K") == 2
+    nxt.drop()
+
+
+def test_send_does_not_ask_for_a_crc_by_default(listener, tmp_path):
+    (tmp_path / "bad.bin").write_bytes(b"b" * 50)
+    nxt, session = _session_with(listener, fs={"d:/dest": None}, corrupt_puts_of=("bad.bin",))
+
+    result = send(session, [str(tmp_path / "bad.bin")], "d:/dest")
+
+    assert result.failures == []  # same size: only the CRC could tell
+    assert b"K" not in nxt.commands
+    nxt.drop()
+
+
+def test_crc_check_that_cannot_run_is_reported_not_raised(listener, tmp_path):
+    (tmp_path / "a.bin").write_bytes(b"a" * 20)
+    nxt, session = _session_with(listener, fs={"d:/dest": None}, ignores=frozenset({b"K"}))
+
+    result = send(session, [str(tmp_path / "a.bin")], "d:/dest", verify_crc=True, timeout=0.3)
+
+    assert [f.name for f in result.failures] == ["d:/dest/a.bin"]
+    assert "CRC not checked" in result.failures[0].reason
+    nxt.drop()
+
+
+def test_a_session_lost_during_a_put_stops_the_batch_and_names_the_partial_file(listener, tmp_path):
+    for name, size in (("a.bin", 100), ("b.bin", 2000), ("c.bin", 100)):
+        (tmp_path / name).write_bytes(b"x" * size)
+    nxt, session = _session_with(listener, fs={"d:/dest": None}, put_drops_at_chunk=("b.bin", 2))
+
+    result = send(session, [str(tmp_path / n) for n in ("a.bin", "b.bin", "c.bin")], "d:/dest")
+
+    assert result.dropped
+    names = [f.name for f in result.failures]
+    assert "d:/dest/c.bin" not in names  # never started: left as it was
+    assert "d:/dest/c.bin" not in nxt.fs
+    partial = next(f for f in result.failures if f.name == "d:/dest/b.bin")
+    assert "1024 bytes" in partial.reason  # what had been sent when the link died
+    assert nxt.fs["d:/dest/b.bin"] == b"x" * 1024  # and nothing was deleted
+
+
+def test_a_session_lost_before_a_file_stops_the_batch_without_failing_the_untouched_files(listener, tmp_path):
+    for name in ("a.txt", "b.txt", "c.txt"):
+        (tmp_path / name).write_bytes(b"data")
+    nxt, session = _session_with(listener, fs={"d:/dest": None})
+
+    def drop_before_b(name, percent):
+        if name == "b.txt":
+            nxt.drop()
+            session.wait_closed(timeout=2)
+
+    result = send(session, [str(tmp_path / n) for n in ("a.txt", "b.txt", "c.txt")], "d:/dest",
+                  progress=drop_before_b)
+
+    assert result.dropped
+    assert "d:/dest/c.txt" not in [f.name for f in result.failures]
+
+
+def test_a_session_lost_during_a_receive_stops_it_and_keeps_what_came(listener, tmp_path):
+    fs = {"d:/src": None, "d:/src/a.bin": b"a" * 50, "d:/src/b.bin": b"b" * 3000, "d:/src/c.bin": b"c" * 50}
+    nxt, session = _session_with(listener, fs=fs, get_drops_after_blocks=2)
+    entries = [Entry("a.bin", False, 50), Entry("b.bin", False, 3000), Entry("c.bin", False, 50)]
+
+    result = receive(session, "d:/src", entries, str(tmp_path))
+
+    assert result.dropped
+    assert "d:/src/b.bin" in [f.name for f in result.failures]
+    assert "d:/src/c.bin" not in [f.name for f in result.failures]
+    assert (tmp_path / "a.bin").read_bytes() == b"a" * 50
+    assert not (tmp_path / "c.bin").exists()
+
+
+def test_cancel_stops_the_crc_checks_between_files(listener, tmp_path):
+    for n in ("a.bin", "b.bin", "c.bin"):
+        (tmp_path / n).write_bytes(b"x" * 20)
+    nxt, session = _session_with(listener, fs={"d:/dest": None})
+
+    result = send(session, [str(tmp_path / n) for n in ("a.bin", "b.bin", "c.bin")], "d:/dest",
+                  verify_crc=True, cancel=lambda: nxt.commands.count(b"K") >= 1)
+
+    assert result.cancelled
+    assert nxt.commands.count(b"K") == 1
+    nxt.drop()
+
+
+def test_a_crc_check_that_times_out_is_not_repeated_for_the_other_files(listener, tmp_path):
+    for n in ("a.bin", "b.bin"):
+        (tmp_path / n).write_bytes(b"x" * 20)
+    nxt, session = _session_with(listener, fs={"d:/dest": None}, ignores=frozenset({b"K"}))
+
+    result = send(session, [str(tmp_path / n) for n in ("a.bin", "b.bin")], "d:/dest",
+                  verify_crc=True, timeout=0.3)
+
+    assert sorted(f.name for f in result.failures) == ["d:/dest/a.bin", "d:/dest/b.bin"]
+    assert all("CRC not checked" in f.reason for f in result.failures)
+    assert nxt.commands.count(b"K") == 1  # the dot is not answering: no point asking again
+    nxt.drop()

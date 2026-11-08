@@ -6,10 +6,11 @@ Session's thread: callers hand results to their own thread themselves."""
 from __future__ import annotations
 
 import os
+import zlib
 from dataclasses import dataclass, field
 from typing import Callable
 
-from nexplorer.protocol import Cancelled, Entry, RemoteError, Session
+from nexplorer.protocol import Cancelled, Entry, RemoteError, Session, Unanswered
 
 Progress = Callable[[str, int], None]
 
@@ -24,6 +25,7 @@ class Failure:
 class Result:
     failures: list[Failure] = field(default_factory=list)
     cancelled: bool = False
+    dropped: bool = False  # the Session died: the operation stopped, the rest was left as it was
 
 
 class _Stop(Exception):
@@ -31,8 +33,16 @@ class _Stop(Exception):
 
 
 class _Job:
-    def __init__(self, session: Session, progress: Progress | None, cancel, timeout: float, total: int):
-        self.session, self.timeout = session, timeout
+    def __init__(
+        self,
+        session: Session,
+        progress: Progress | None,
+        cancel,
+        timeout: float,
+        total: int,
+        verify_crc: bool = False,
+    ):
+        self.session, self.timeout, self.verify_crc = session, timeout, verify_crc
         self.result = Result()
         self._progress, self._cancel = progress, cancel
         self._total, self._done = total, 0
@@ -53,6 +63,13 @@ class _Job:
     def finished(self, size: int) -> None:
         self._done += size
 
+    def lose(self, name: str, reason: str) -> None:
+        """The Session died: record the file it died on and stop the whole operation."""
+        self.result.dropped = True
+        self.result.cancelled = bool(self._cancel and self._cancel())  # a Cancel asked meanwhile still counts
+        self.fail(name, f"session lost; {reason}")
+        raise _Stop
+
     def fail(self, name: str, reason: str) -> None:
         self.result.failures.append(Failure(name, reason))
 
@@ -65,9 +82,13 @@ def send(
     progress: Progress | None = None,
     cancel: Callable[[], bool] | None = None,
     timeout: float = 60,
+    verify_crc: bool = False,
 ) -> Result:
-    """Upload files and folders (recursively) into `next_dir` on the Next."""
-    job = _Job(session, progress, cancel, timeout, sum(_local_size(p) for p in local_paths))
+    """Upload files and folders (recursively) into `next_dir` on the Next.
+
+    Sizes are always checked; `verify_crc` adds a CRC-32 check of each file (slow: the Next
+    reads every file back, about 30 s per MB)."""
+    job = _Job(session, progress, cancel, timeout, sum(_local_size(p) for p in local_paths), verify_crc)
     try:
         _send_entries(job, next_dir, local_paths, ())
     except _Stop:
@@ -113,6 +134,8 @@ def _send_folder(job: _Job, local: str, target: str, ancestors: tuple[str, ...])
         return
     try:
         job.session.make_dir(target, timeout=job.timeout)
+    except ConnectionError:
+        job.lose(target, "folder not created")
     except RemoteError as exc:
         try:  # esxDOS answers the same for "exists" and for real failures
             job.session.list_dir(target, timeout=job.timeout)
@@ -132,6 +155,12 @@ def _upload_files(job: _Job, folder: str, files: list[str]) -> None:
         for local in files:
             job.check_cancel()
             name = _base(local)
+            reached = [0]  # bytes handed to the Next so far for this file
+
+            def on_progress(n: int, name: str = name, reached: list[int] = reached) -> None:
+                reached[0] = n
+                job.report(name, n)
+
             try:
                 size = os.path.getsize(local)
                 job.report(name)
@@ -139,37 +168,68 @@ def _upload_files(job: _Job, folder: str, files: list[str]) -> None:
                     local,
                     _join(folder, name),
                     timeout=job.timeout,
-                    progress=lambda n, name=name: job.report(name, n),
+                    progress=on_progress,
                     cancel=job._cancel,
                 )
-                sent[name.lower()] = (name, size)
+                sent[name.lower()] = (name, size, local)
                 job.finished(size)
                 job.report(name)
             except Cancelled:
                 job.result.cancelled = True
                 job.fail(_join(folder, name), _partial_reason("cancelled", job, folder, name))
                 raise _Stop from None
+            except (ConnectionError, TimeoutError):  # a put cut short ends the Session
+                reason = (
+                    f"{reached[0]} bytes had been sent, a partial file may be left"
+                    if reached[0]
+                    else "file not sent"
+                )
+                job.lose(_join(folder, name), reason)
             except (RemoteError, OSError) as exc:
                 job.fail(_join(folder, name), _partial_reason(str(exc), job, folder, name))
     finally:
         _check_sizes(job, folder, sent)
 
 
-def _check_sizes(job: _Job, folder: str, sent: dict[str, tuple[str, int]]) -> None:
+def _check_crc(job: _Job, folder: str, name: str, size: int, local: str) -> str:
+    """Compare the CRC-32s. Returns why the checks should stop (no reply, link lost), or ""."""
+    target = _join(folder, name)
+    try:
+        expected = 0
+        with open(local, "rb") as f:
+            while chunk := f.read(65536):
+                expected = zlib.crc32(chunk, expected)
+        found = job.session.crc(target, timeout=job.timeout + size / 15_000)
+    except (RemoteError, OSError) as exc:
+        job.fail(target, f"CRC not checked: {exc}")
+        return str(exc) if isinstance(exc, (TimeoutError, ConnectionError, Unanswered)) else ""
+    if found != expected:
+        job.fail(target, f"CRC on the Next is {found:08X}, expected {expected:08X}")
+    return ""
+
+
+def _check_sizes(job: _Job, folder: str, sent: dict[str, tuple[str, int, str]]) -> None:
     if not sent:
         return
     try:
         found = {e.name.lower(): e.size for e in job.session.list_dir(folder, timeout=job.timeout)}
     except (RemoteError, OSError) as exc:  # a dead Session or a timeout too
-        for name, _ in sent.values():
+        for name, _, _ in sent.values():
             job.fail(_join(folder, name), f"size not checked: {exc}")
         return
-    for key, (name, expected) in sent.items():
+    crc_stopped = ""  # why the CRC checks ended early: the dot is not answering
+    for key, (name, expected, local) in sent.items():
         if found.get(key) != expected:
             job.fail(
                 _join(folder, name),
                 f"size on the Next is {found.get(key, 'missing')}, expected {expected}",
             )
+        elif job.verify_crc and not job.result.cancelled:
+            job.check_cancel()
+            if crc_stopped:
+                job.fail(_join(folder, name), f"CRC not checked: {crc_stopped}")
+            else:
+                crc_stopped = _check_crc(job, folder, name, expected, local)
 
 
 def _partial_reason(reason: str, job: _Job, folder: str, name: str) -> str:
@@ -262,6 +322,8 @@ def _download(job: _Job, folder: str, nodes: list[_Node], local: str) -> None:
                 written = os.path.getsize(target)
                 if written != entry.size:
                     job.fail(source, f"received {written} bytes, expected {entry.size}")
+        except (ConnectionError, TimeoutError):
+            job.lose(source, "file not received")
         except (RemoteError, OSError) as exc:
             job.fail(source, str(exc))
 

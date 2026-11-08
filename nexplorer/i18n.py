@@ -19,3 +19,9 @@ def set_language(code: str, catalogue_dir: Path | None = None) -> None:
 
 def tr(text: str) -> str:
     return _catalogue.get(text, text)
+
+
+def available_languages(catalogue_dir: Path | None = None) -> list[str]:
+    """Language codes with a catalogue, plus English (the built-in text)."""
+    found = {p.stem for p in (catalogue_dir or _DEFAULT_DIR).glob("*.json")}
+    return sorted(found | {"en"})

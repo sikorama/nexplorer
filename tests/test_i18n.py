@@ -16,3 +16,21 @@ def test_catalogue_translates_by_english_text(tmp_path):
         assert i18n.tr("Next") == "Next"  # missing entry falls back
     finally:
         i18n.set_language("en")
+
+
+def test_shipped_catalogues_are_listed_and_french_translates():
+    assert "en" in i18n.available_languages() and "fr" in i18n.available_languages()
+    i18n.set_language("fr")
+    try:
+        assert i18n.tr("Quit") == "Quitter"
+        assert i18n.tr("a text no catalogue knows") == "a text no catalogue knows"
+    finally:
+        i18n.set_language("en")
+
+
+def test_every_shipped_catalogue_is_valid_json_of_strings():
+    for code in i18n.available_languages():
+        path = i18n._DEFAULT_DIR / f"{code}.json"
+        if path.exists():
+            data = json.loads(path.read_text(encoding="utf-8"))
+            assert all(isinstance(k, str) and isinstance(v, str) for k, v in data.items())

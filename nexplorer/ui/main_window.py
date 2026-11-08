@@ -1,12 +1,19 @@
 from __future__ import annotations
 
+import base64
 import os
 import threading
+from pathlib import Path
 from typing import Callable
 
 from PySide6.QtCore import QObject, Qt, Signal
 from PySide6.QtNetwork import QAbstractSocket, QNetworkInterface
 from PySide6.QtWidgets import (
+    QCheckBox,
+    QComboBox,
+    QDialog,
+    QDialogButtonBox,
+    QFormLayout,
     QHBoxLayout,
     QInputDialog,
     QLabel,
@@ -19,9 +26,11 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from nexplorer.i18n import tr
+from nexplorer import settings as settings_store
+from nexplorer.i18n import available_languages, set_language, tr
 from nexplorer.protocol import Listener
 from nexplorer.transfer import Result, copy, is_plain_name, make_folder, move, receive, remove, rename, send
+from nexplorer.settings import Settings
 from nexplorer.ui.bridge import ListenerBridge
 from nexplorer.ui.panes import LocalPane, NextPane
 
@@ -55,6 +64,36 @@ def _confirm_delete_dialog(message: str) -> bool:
     return answer == QMessageBox.Yes
 
 
+def _settings_dialog(current: Settings) -> Settings | None:
+    dialog = QDialog()
+    dialog.setWindowTitle(tr("Settings"))
+    hidden = QCheckBox(tr("Show hidden files"))
+    hidden.setChecked(current.show_hidden)
+    crc = QCheckBox(tr("Verify the CRC after each upload"))
+    crc.setChecked(current.crc_after_upload)
+    language = QComboBox()
+    language.addItems(available_languages())
+    language.setCurrentText(current.language)
+    buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+    buttons.accepted.connect(dialog.accept)
+    buttons.rejected.connect(dialog.reject)
+    form = QFormLayout(dialog)
+    form.addRow(hidden)
+    form.addRow(crc)
+    form.addRow(tr("Language"), language)
+    form.addRow(buttons)
+    if dialog.exec() != QDialog.Accepted:
+        return None
+    return Settings(
+        **{
+            **current.__dict__,
+            "show_hidden": hidden.isChecked(),
+            "crc_after_upload": crc.isChecked(),
+            "language": language.currentText(),
+        }
+    )
+
+
 class _Operation(QObject):
     progress = Signal(str, int)
     finished = Signal(object)  # transfer.Result, or the exception that ended it
@@ -68,8 +107,14 @@ class MainWindow(QMainWindow):
         local_addresses: Callable[[], list[tuple[str, str]]] = local_ipv4_addresses,
         ask_name: Callable[[str, str], str | None] = _ask_name_dialog,
         confirm_delete: Callable[[str], bool] = _confirm_delete_dialog,
+        settings_path: Path | None = None,
+        ask_settings: Callable[[Settings], Settings | None] = _settings_dialog,
     ):
         super().__init__()
+        # Without a path nothing is read or written (tests, throwaway windows).
+        self._settings_path = settings_path
+        self._settings = settings_store.load(settings_path) if settings_path else Settings()
+        self._ask_settings = ask_settings
         self._ask_name, self._confirm_delete = ask_name, confirm_delete
         self.setWindowTitle("nexplorer")
         self._local_addresses = local_addresses
@@ -89,7 +134,13 @@ class MainWindow(QMainWindow):
         self._stack.addWidget(self._connected_page)
 
         root = QWidget()
-        self._local_pane = LocalPane(os.path.expanduser("~"))
+        start = self._settings.local_folder
+        self._local_pane = LocalPane(start if os.path.isdir(start) else os.path.expanduser("~"))
+        self._next_pane.preferred_path = self._settings.next_folder
+        self._local_pane.set_sort(self._settings.local_sort)
+        self._next_pane.set_sort(self._settings.next_sort)
+        self._local_pane.set_show_hidden(self._settings.show_hidden)
+        self._next_pane.set_show_hidden(self._settings.show_hidden)
         row = QHBoxLayout()
         row.addWidget(self._pane(tr("Local"), self._local_pane))
         row.addWidget(self._pane(tr("Next"), self._stack))
@@ -120,6 +171,9 @@ class MainWindow(QMainWindow):
         actions.addWidget(self._paste)
         actions.addWidget(self._delete)
         actions.addStretch(1)
+        self._settings_button = QPushButton(tr("Settings"))
+        self._settings_button.clicked.connect(self.open_settings)
+        actions.addWidget(self._settings_button)
         self._disconnect = QPushButton(tr("Disconnect"))
         self._disconnect.clicked.connect(self.disconnect)
         actions.addWidget(self._disconnect)
@@ -161,6 +215,8 @@ class MainWindow(QMainWindow):
         column.addWidget(self._op_row)
         self.setCentralWidget(root)
         self.resize(900, 500)
+        if self._settings.geometry:
+            self.restoreGeometry(base64.b64decode(self._settings.geometry))
 
         self._show_waiting()
         self._listener = listener
@@ -216,14 +272,16 @@ class MainWindow(QMainWindow):
         session = self._next_pane.session()
         paths = [os.path.join(self._local_pane.path(), e.name) for e in self._local_pane.selected_entries()]
         folder = self._next_pane.path()
+        verify = self._settings.crc_after_upload
         if session and paths and folder:
-            self._run(lambda progress, cancel: send(session, paths, folder, progress, cancel))
+            self._run(lambda progress, cancel: send(session, paths, folder, progress, cancel, verify_crc=verify))
 
     def drop_files(self, paths: list[str], subfolder: str = "") -> None:
         """Files dropped on the Next pane: send them into the folder shown, or the subfolder hit."""
         session, folder = self._next_pane.session(), self._next_pane.folder_path(subfolder)
+        verify = self._settings.crc_after_upload
         if session and paths and folder:
-            self._run(lambda progress, cancel: send(session, paths, folder, progress, cancel))
+            self._run(lambda progress, cancel: send(session, paths, folder, progress, cancel, verify_crc=verify))
 
     def drop_next_entries(self, names: list[str]) -> None:
         """Next entries dragged onto the Local pane: receive them into the Local folder shown."""
@@ -385,6 +443,8 @@ class MainWindow(QMainWindow):
         if isinstance(outcome, Result):
             lines = [f"{f.name}: {f.reason}" for f in outcome.failures]
             head = tr("Cancelled") if outcome.cancelled else tr("Done")
+            if outcome.dropped:
+                head = tr("Session lost, operation stopped")
             if lines:
                 head += f" \u2014 {len(lines)} " + tr("failed")
             self._summary.setText("\n".join([head, *lines]))
@@ -472,7 +532,33 @@ class MainWindow(QMainWindow):
     def quit_text(self) -> str:
         return self._quit_button.text()
 
+    def open_settings(self) -> None:
+        changed = self._ask_settings(self._settings)
+        if changed is not None:
+            self.apply_settings(changed)
+            self._write_settings()
+
+    def apply_settings(self, new: Settings) -> None:
+        """Take the choices that act at once; a new language shows at the next start."""
+        self._settings = new
+        self._local_pane.set_show_hidden(new.show_hidden)
+        self._next_pane.set_show_hidden(new.show_hidden)
+
+    def _write_settings(self) -> None:
+        if self._settings_path is None:
+            return
+        s = self._settings
+        s.local_folder = self._local_pane.path() or s.local_folder
+        s.next_folder = self._next_pane.path() or s.next_folder
+        s.local_sort, s.next_sort = self._local_pane.sort(), self._next_pane.sort()
+        s.geometry = base64.b64encode(bytes(self.saveGeometry())).decode()
+        try:
+            settings_store.save(s, self._settings_path)
+        except OSError:
+            pass  # the app still works; the choices are just not kept
+
     def closeEvent(self, event) -> None:
+        self._write_settings()
         self._cancel.set()
         self._listener.end_session()  # the Next is told to quit before the link goes
         self._bridge.stop()

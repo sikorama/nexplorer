@@ -45,6 +45,10 @@ class RemoteError(Exception):
     """The Next answered a command with a failure."""
 
 
+class Unanswered(RemoteError):
+    """The dot ignored the command: it is too old to know it."""
+
+
 class Cancelled(Exception):
     """The caller asked to stop a put; the file is left partially written on the Next."""
 
@@ -314,6 +318,19 @@ class Session:
         reply = self._call(b"R" + _wire_path(path), timeout)
         if reply is None or reply[:1] != b"O":
             raise RemoteError(f"cannot delete folder {path}")
+
+    def crc(self, path: str, timeout: float | None = None) -> int:
+        """CRC-32 of a file on the Next (`K`, dot 5.9.2). The Next answers nothing while it reads
+        the file (about 30 s per MB): the caller sizes `timeout`. RemoteError when it fails."""
+        reply = self._call(b"K" + _wire_path(path), timeout)
+        if reply is None:
+            raise Unanswered(f"the dot does not answer K (older than 5.9.2?): {path}")
+        if reply[:1] != b"O" or len(reply) != 9:
+            raise RemoteError(f"cannot read the CRC of {path}")
+        try:
+            return int(reply[1:].decode("ascii"), 16)
+        except ValueError:
+            raise RemoteError(f"cannot read the CRC of {path}") from None
 
     def close(self) -> None:
         """End the Session: the Next is told to quit at its next poll."""

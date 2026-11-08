@@ -12,3 +12,16 @@ Label: ready-for-agent
 - [ ] Third-party notices carry the Unite MIT notice and the Jari Komppa / Unlicense credit
 - [ ] `examples/` contains the owner's NextBASIC launcher programs (to be supplied by the owner; do not invent them)
 - [ ] Everything is written in English
+
+
+
+Je voudrais ajouter un tuto pour les gens qui commencent avec le next. L'idée est de mettre en place le nécessaire pour pouvoir utiliser l'outil
+
+1/ Il faut configurer le wifi
+2/ Il faut installer la commande dot .sync5 via gettit (on pourra profiter pour installer gettit2 si ce n'est déja fait)
+3/ Le fichier sync doit etre déplacée  dans le répertoirte  c:/DOT
+4/ Ensuite il faut lancer l'application python sur le PC, et sur le next `.sync -L <ip>`
+5/ Pour simplifier l'utilisation, on pourr coppier le programme basic wrap-sync qui lance la commande .sync directement depuis le browser
+
+
+

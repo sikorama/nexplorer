@@ -3,6 +3,7 @@
 Speaks the protocol documented in docs/protocol.md against an in-memory state.
 """
 import socket
+import zlib
 import threading
 import time
 
@@ -45,6 +46,8 @@ class FakeNext:
         get_drops_after_blocks: int | None = None,
         copy_fails_after: int | None = None,
         copy_silently_truncates: bool = False,
+        corrupt_puts_of: tuple[str, ...] = (),
+        put_drops_at_chunk: tuple[str, int] | None = None,
     ):
         """`ignores`: opcodes an older dot does not know (silently ignored).
         `drops_on`: opcodes on which the link dies mid-command.
@@ -63,7 +66,7 @@ class FakeNext:
         once and starts the file again). `put_chunk_delay`: seconds the Next takes
         before asking for each put chunk. `put_stalls_at_chunk`: the Next stops
         answering a put at that chunk index (until `drop`). `copy_fails_after`: a copy (`C`) stops with `F` after that many files copied. `copy_silently_truncates`: `C` reports success but drops the last byte of each file. `get_drops_after_blocks`: the link dies after that many `D`
-        blocks of a get. `commands`: opcodes received, in order (idle `I` excluded)."""
+        blocks of a get. `corrupt_puts_of`: names of files whose put ends with the right size but a wrong last byte. `put_drops_at_chunk`: (file name, chunk index): the link dies when the Next would ask for that chunk of that file. `commands`: opcodes received, in order (idle `I` excluded)."""
         self.host, self.port, self.version = host, port, version
         self.ignores, self.drops_on, self.poll_interval = ignores, drops_on, poll_interval
         self.commands: list[bytes] = []
@@ -80,6 +83,8 @@ class FakeNext:
         self.get_drops_after_blocks = get_drops_after_blocks
         self.copy_fails_after = copy_fails_after
         self.copy_silently_truncates = copy_silently_truncates
+        self.put_drops_at_chunk = put_drops_at_chunk
+        self.corrupt_puts_of = tuple(n.lower() for n in corrupt_puts_of)
         self.retries_sent = 0
         self.listed: list[str] = []  # paths received by `L`, in order
         self.max_listing_block = 0  # largest `D` listing block sent, in bytes
@@ -181,6 +186,12 @@ class FakeNext:
                         self._push_status(b"O" + self.free_blocks[drive].to_bytes(4, "little"))
                     else:
                         self._push_status(b"F")
+                elif op == b"K":
+                    content = self.fs.get(arg.decode("ascii").lower())
+                    if content is None:
+                        self._push_status(b"F")
+                    else:
+                        self._push_status(b"O" + b"%08X" % zlib.crc32(content))
                 elif op == b"G":
                     self._get(arg.decode("ascii"))
                 elif op == b"M":
@@ -252,6 +263,9 @@ class FakeNext:
                 while not self._stop:
                     time.sleep(0.01)
                 return
+            if self.put_drops_at_chunk == (key.rpartition("/")[2], index):
+                self.sock.close()
+                raise ConnectionError("link lost")
             self.sock.sendall(b"Get")
             payload, no = self._recv_frame()
             assert no == counter, "unexpected packetno from Listener"
@@ -270,6 +284,8 @@ class FakeNext:
                 counter = index = 0
                 continue
             if not payload:  # the empty frame ends the file
+                if key.rpartition("/")[2] in self.corrupt_puts_of and self.fs[key]:
+                    self.fs[key] = self.fs[key][:-1] + bytes([self.fs[key][-1] ^ 0xFF])
                 return
             limit = self.truncate_puts_to
             if limit is not None and len(self.fs[key]) + len(payload) > limit:
