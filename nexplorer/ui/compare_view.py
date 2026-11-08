@@ -1,17 +1,19 @@
 from __future__ import annotations
 
 from PySide6.QtCore import Qt, Signal
+from PySide6.QtGui import QBrush, QPalette
 from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QPushButton,
+    QStyle,
     QTreeWidget,
     QTreeWidgetItem,
     QVBoxLayout,
     QWidget,
 )
 
-from nexplorer.compare import Row
+from nexplorer.compare import BLOCKED, Row
 from nexplorer.i18n import tr
 from nexplorer.protocol import Entry
 from nexplorer.ui.panes import format_size
@@ -27,6 +29,10 @@ def _states() -> dict[str, str]:
         "unverified": tr("Unverified"),
         "identical": tr("Identical"),
         "not-scanned": tr("Not scanned"),
+        "conflict": tr("Conflict"),
+        "invalid": tr("Invalid"),
+        "ignored": tr("Ignored"),
+        "hidden": tr("Hidden"),
     }
 
 
@@ -108,8 +114,11 @@ class CompareView(QWidget):
                 ["", r.name, _size(r.local), _ARROWS[r.direction], _size(r.remote), states[r.state]]
             )
             item.setData(1, Qt.UserRole, path)
-            item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
-            item.setCheckState(0, Qt.Checked if r.checked else Qt.Unchecked)
+            if r.state in BLOCKED:
+                self._mark_blocked(item, r.state)
+            else:
+                item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
+                item.setCheckState(0, Qt.Checked if r.checked else Qt.Unchecked)
             parent.addChild(item)
             if r.state == "not-scanned" and r.children is None:
                 item.setChildIndicatorPolicy(QTreeWidgetItem.ShowIndicator)
@@ -122,6 +131,17 @@ class CompareView(QWidget):
         row = self.row(path)
         if row.children is None and row.state == "not-scanned":
             self.expand_requested.emit(path)
+
+    def _mark_blocked(self, item: QTreeWidgetItem, state: str) -> None:
+        """Greyed rows the user cannot check; an invalid one also gets an error icon."""
+        grey = QBrush(self.palette().color(QPalette.Disabled, QPalette.Text))
+        for col in range(self._tree.columnCount()):
+            item.setForeground(col, grey)
+        if state in ("invalid", "conflict"):
+            item.setIcon(5, self.style().standardIcon(QStyle.SP_MessageBoxCritical))
+
+    def state_texts(self) -> dict[str, str]:
+        return {r.name: self._tree.topLevelItem(i).text(5) for i, r in enumerate(self._rows)}
 
     def _on_item_changed(self, item: QTreeWidgetItem, _column: int) -> None:
         self.row(item.data(1, Qt.UserRole)).checked = item.checkState(0) == Qt.Checked

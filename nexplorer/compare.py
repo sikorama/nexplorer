@@ -3,8 +3,10 @@
 Compare never deletes anything on either side: Apply only sends or receives."""
 from __future__ import annotations
 
+import fnmatch
 import os
 import zlib
+from collections import Counter
 from dataclasses import dataclass
 from typing import Callable
 
@@ -12,10 +14,14 @@ from nexplorer.protocol import Entry, RemoteError, Session, Unanswered
 from nexplorer.transfer import Failure, Progress, Result, receive, send
 
 
+# Rows shown to the user but never transferred.
+BLOCKED = frozenset({"conflict", "invalid", "ignored", "hidden"})
+
+
 @dataclass
 class Row:
     name: str
-    state: str  # "only-local", "only-next", "different", "unverified", "identical" or "not-scanned"
+    state: str  # "only-local", "only-next", "different", "unverified", "identical" "not-scanned" or a blocked state
     direction: str | None  # "to-next", "to-local" or None
     checked: bool
     local: Entry | None = None
@@ -27,18 +33,69 @@ class Row:
         self.direction = "to-local" if self.direction == "to-next" else "to-next"
 
     def transferable(self) -> bool:
+        if self.state in BLOCKED:
+            return False
         source = self.local if self.direction == "to-next" else self.remote
         return self.checked and self.direction is not None and source is not None
 
 
-def compare_level(local: list[Entry], remote: list[Entry]) -> list[Row]:
-    """One row per name found on either side; a size mismatch is different, the same size stays unverified until Verify."""
-    remote_by_name = {e.name: e for e in remote}
-    local_names = {e.name for e in local}
+MAX_PATH_BYTES = 254
+_FORBIDDEN = set('"*:<>?|\\/')
+
+
+def _invalid(name: str, next_dir: str) -> bool:
+    """A name or path the Next's file system refuses."""
+    if any(c in _FORBIDDEN or ord(c) < 32 for c in name):
+        return True
+    return len(f"{next_dir}/{name}".encode("utf-8", "replace")) > MAX_PATH_BYTES
+
+
+IGNORE_FILE = ".nexplorerignore"
+
+
+def read_ignore(folder: str | os.PathLike) -> list[str]:
+    """The glob patterns of the folder's .nexplorerignore, one per line, # for comments."""
+    try:
+        with open(os.path.join(folder, IGNORE_FILE), encoding="utf-8", errors="replace") as f:
+            lines = [line.strip() for line in f]
+    except OSError:
+        return []
+    return [line for line in lines if line and not line.startswith("#")]
+
+
+def _blocked(name: str, next_dir: str, ignore: list[str], show_hidden: bool) -> str | None:
+    if _invalid(name, next_dir):
+        return "invalid"
+    if any(fnmatch.fnmatchcase(name, p) for p in ignore):
+        return "ignored"
+    if not show_hidden and name.startswith("."):
+        return "hidden"
+    return None
+
+
+def compare_level(
+    local: list[Entry],
+    remote: list[Entry],
+    next_dir: str = "",
+    ignore: list[str] = (),
+    show_hidden: bool = True,
+) -> list[Row]:
+    """One row per name found on either side; a size mismatch is different, the same size stays unverified until Verify.
+
+    Entries that must not move (invalid, conflicting, ignored, hidden) stay as rows in a
+    blocked state, never dropped."""
+    remote_by_name = {e.name.casefold(): e for e in remote}
+    local_names = {e.name.casefold() for e in local}
+    case_count = Counter(e.name.casefold() for e in local)
     rows = []
     for e in local:
-        other = remote_by_name.get(e.name)
-        if other is None:
+        other = remote_by_name.get(e.name.casefold())
+        blocked = _blocked(e.name, next_dir, ignore, show_hidden)
+        if blocked != "invalid" and case_count[e.name.casefold()] > 1:
+            blocked = "conflict"
+        if blocked:
+            rows.append(Row(e.name, blocked, None, False, e, other))
+        elif other is None:
             rows.append(Row(e.name, "only-local", "to-next", True, e, None))
         elif e.is_dir and other.is_dir:
             rows.append(Row(e.name, "not-scanned", None, False, e, other))
@@ -46,7 +103,11 @@ def compare_level(local: list[Entry], remote: list[Entry]) -> list[Row]:
             rows.append(Row(e.name, "different", None, False, e, other))
         else:
             rows.append(Row(e.name, "unverified", None, False, e, other))
-    rows += [Row(e.name, "only-next", "to-local", True, None, e) for e in remote if e.name not in local_names]
+    for e in remote:
+        if e.name.casefold() in local_names:
+            continue
+        blocked = _blocked(e.name, next_dir, ignore, show_hidden)
+        rows.append(Row(e.name, blocked or "only-next", None if blocked else "to-local", not blocked, None, e))
     return rows
 
 
@@ -54,13 +115,12 @@ def _join_next(folder: str, name: str) -> str:
     return folder.rstrip("/") + "/" + name
 
 
-def _list_local(path: str, show_hidden: bool) -> list[Entry]:
+def _list_local(path: str) -> list[Entry]:
     entries = []
     with os.scandir(path) as it:
         for e in it:
-            if show_hidden or not e.name.startswith("."):
-                is_dir = e.is_dir()
-                entries.append(Entry(e.name, is_dir, 0 if is_dir else e.stat().st_size))
+            is_dir = e.is_dir()
+            entries.append(Entry(e.name, is_dir, 0 if is_dir else e.stat().st_size))
     return entries
 
 
@@ -81,10 +141,21 @@ def settle(row: Row) -> None:
         row.state = "different"
 
 
-def expand(session: Session, row: Row, local_dir: str, next_dir: str, show_hidden: bool = True) -> None:
-    """List the next level of a folder present on both sides (Local, then the Next)."""
-    remote = [e for e in session.list_dir(_join_next(next_dir, row.name)) if show_hidden or not e.name.startswith(".")]
-    row.children = compare_level(_list_local(os.path.join(local_dir, row.name), show_hidden), remote)
+def expand(
+    session: Session,
+    row: Row,
+    local_dir: str,
+    next_dir: str,
+    show_hidden: bool = True,
+    ignore: list[str] = (),
+) -> None:
+    """List the next level of a folder present on both sides (Local, then the Next), under the naming rules.
+
+    The Local folder's patterns apply to every level; a subfolder's own ignore file is not read."""
+    child_next = _join_next(next_dir, row.name)
+    row.children = compare_level(
+        _list_local(os.path.join(local_dir, row.name)), session.list_dir(child_next), child_next, ignore, show_hidden
+    )
     settle(row)
 
 
@@ -96,6 +167,7 @@ def scan_all(
     progress: Progress | None = None,
     cancel: Callable[[], bool] | None = None,
     show_hidden: bool = True,
+    ignore: list[str] = (),
 ) -> Result:
     """Expand every not scanned folder below `rows`; Cancel leaves the unreached ones not scanned."""
     result = Result()
@@ -110,7 +182,7 @@ def scan_all(
             if progress:
                 progress(r.name, 100 * done // (done + len(pending) + 1))
             try:
-                expand(session, r, ldir, ndir, show_hidden)
+                expand(session, r, ldir, ndir, show_hidden, ignore)
             except (ConnectionError, TimeoutError):
                 result.dropped = True
                 result.failures.append(Failure(r.name, "session lost"))

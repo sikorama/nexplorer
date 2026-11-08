@@ -33,6 +33,7 @@ from nexplorer.compare import (
     Row,
     apply as apply_rows,
     compare_level,
+    read_ignore,
     expand as expand_row,
     scan_all,
     verify as verify_rows,
@@ -411,14 +412,19 @@ class MainWindow(QMainWindow):
         local_dir, next_dir = self._local_pane.path(), self._next_pane.path()
         if not session or not local_dir or not next_dir or self._busy:
             return
-        rows = compare_level(self._shown(self._local_pane), self._shown(self._next_pane))
+        rows = compare_level(
+            self._local_pane.entries(),
+            self._next_pane.entries(),
+            next_dir,
+            read_ignore(local_dir),
+            self._settings.show_hidden,
+        )
         self._compare_view.show_rows(f"{local_dir}  \u2194  {next_dir}", rows)
         self._views.setCurrentWidget(self._compare_view)
         self._update_actions()
 
-    def _shown(self, pane) -> list:
-        hidden = self._settings.show_hidden
-        return [e for e in pane.entries() if hidden or not e.name.startswith(".")]
+    def compare_state_texts(self) -> dict[str, str]:
+        return self._compare_view.state_texts()
 
     def compare_back(self) -> None:
         self._views.setCurrentIndex(0)
@@ -461,10 +467,10 @@ class MainWindow(QMainWindow):
         *parents, _ = path.split("/")
         row = self._compare_view.row(path)
         local_dir, next_dir = os.path.join(local_dir, *parents), "/".join([next_dir.rstrip("/"), *parents])
-        hidden = self._settings.show_hidden
+        hidden, ignore = self._settings.show_hidden, read_ignore(self._local_pane.path())
 
         def work(progress, cancel):
-            expand_row(session, row, local_dir, next_dir, hidden)
+            expand_row(session, row, local_dir, next_dir, hidden, ignore)
             return Result()
 
         self._run(work)
@@ -476,7 +482,10 @@ class MainWindow(QMainWindow):
         if not session or not local_dir or not next_dir or self._busy:
             return
         rows, hidden = self._compare_view.rows(), self._settings.show_hidden
-        self._run(lambda progress, cancel: scan_all(session, rows, local_dir, next_dir, progress, cancel, hidden))
+        ignore = read_ignore(local_dir)
+        self._run(
+            lambda progress, cancel: scan_all(session, rows, local_dir, next_dir, progress, cancel, hidden, ignore)
+        )
 
     def compare_states(self) -> list[tuple[str, str]]:
         """(path, state) of every row shown, nested ones included."""

@@ -1,5 +1,31 @@
-from nexplorer.compare import compare_level
+from nexplorer.compare import compare_level, read_ignore
 from nexplorer.protocol import Entry
+
+
+def test_nexplorerignore_patterns_mark_rows_ignored_and_not_transferable(tmp_path):
+    (tmp_path / ".nexplorerignore").write_text("# build output\n*.bak\n\nbuild\n")
+    for name in ("a.tap", "a.bak", "build"):
+        (tmp_path / name).write_bytes(b"x")
+    local = [Entry(p.name, False, 1) for p in sorted(tmp_path.iterdir())]
+    rows = compare_level(local, [Entry("b.bak", False, 1)], ignore=read_ignore(tmp_path))
+    assert {r.name: (r.state, r.transferable()) for r in rows} == {
+        ".nexplorerignore": ("only-local", True),
+        "a.tap": ("only-local", True),
+        "a.bak": ("ignored", False),
+        "build": ("ignored", False),
+        "b.bak": ("ignored", False),
+    }
+    assert read_ignore(tmp_path / "nowhere") == []
+
+
+def test_hidden_entries_are_kept_as_hidden_rows_unless_the_setting_shows_them():
+    local = [Entry(".git", True, 0), Entry("a.tap", False, 1)]
+    hidden = compare_level(local, [], show_hidden=False)
+    assert [(r.name, r.state, r.transferable()) for r in hidden] == [
+        (".git", "hidden", False),
+        ("a.tap", "only-local", True),
+    ]
+    assert [r.state for r in compare_level(local, [], show_hidden=True)] == ["only-local", "only-local"]
 
 
 def row(rows, name):
@@ -128,6 +154,37 @@ def test_a_reversed_one_sided_row_has_no_source_so_nothing_moves_and_nothing_is_
 def test_a_folder_on_both_sides_is_not_scanned_and_has_nothing_to_transfer():
     r = row(compare_level([Entry("games", True, 0)], [Entry("games", True, 0)]), "games")
     assert (r.state, r.direction, r.checked, r.children) == ("not-scanned", None, False, None)
+
+
+def test_names_match_without_regard_to_case():
+    rows = compare_level([Entry("Foo.TXT", False, 10)], [Entry("foo.txt", False, 10)])
+    assert [(r.name, r.state) for r in rows] == [("Foo.TXT", "unverified")]
+
+
+def test_two_local_entries_differing_only_by_case_are_a_conflict_and_never_transferred():
+    rows = compare_level([Entry("a.tap", False, 1), Entry("A.TAP", False, 2)], [])
+    assert [(r.name, r.state, r.direction, r.checked) for r in rows] == [
+        ("a.tap", "conflict", None, False),
+        ("A.TAP", "conflict", None, False),
+    ]
+    rows[0].reverse()
+    rows[0].checked = True
+    assert not rows[0].transferable()
+
+
+def test_over_long_or_fat_forbidden_paths_are_invalid_and_excluded():
+    long_name = "x" * 250 + ".tap"  # 254 bytes alone, over the limit with "d:/dest/"
+    entries = [Entry(long_name, False, 1), Entry("a?b.tap", False, 1), Entry("ok.tap", False, 1)]
+    rows = compare_level(entries, [], next_dir="d:/dest")
+    assert [(r.state, r.checked, r.transferable()) for r in rows] == [
+        ("invalid", False, False),
+        ("invalid", False, False),
+        ("only-local", True, True),
+    ]
+    exact = "y" * (254 - len("d:/dest/")) 
+    assert compare_level([Entry(exact, False, 1)], [], next_dir="d:/dest")[0].state == "only-local"
+    over = "y" * (255 - len("d:/dest/"))
+    assert compare_level([Entry(over, False, 1)], [], next_dir="d:/dest")[0].state == "invalid"
 
 
 def test_verify_asks_the_next_for_the_crc_of_same_size_files_only_and_settles_each_row(listener, tmp_path):

@@ -120,3 +120,22 @@ def test_apply_transfers_checked_rows_found_inside_an_expanded_folder(listener, 
     assert (tmp_path / "games" / "down.tap").read_bytes() == b"down"
     assert "d:/dest/top.tap" not in nxt.fs
     nxt.drop()
+
+
+def test_an_expanded_level_applies_the_naming_rules_and_is_never_transferred_when_blocked(listener, tmp_path):
+    fs = _tree(tmp_path)
+    for name in ("bad?.tap", "junk.bak", ".hid"):
+        (tmp_path / "games" / name).write_bytes(b"x")
+    nxt, session = _session_with(listener, fs)
+    rows = _top(tmp_path)
+
+    expand(session, row(rows, "games"), str(tmp_path), "d:/dest", show_hidden=False, ignore=["*.bak"])
+
+    kids = row(rows, "games").children
+    assert (row(kids, "bad?.tap").state, row(kids, "junk.bak").state, row(kids, ".hid").state) == (
+        "invalid", "ignored", "hidden",
+    )
+    apply(session, str(tmp_path), "d:/dest", rows)
+    assert set(nxt.fs) & {"d:/dest/games/bad?.tap", "d:/dest/games/junk.bak", "d:/dest/games/.hid"} == set()
+    assert nxt.fs["d:/dest/games/up.tap"] == b"up"
+    nxt.drop()
