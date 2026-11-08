@@ -117,3 +117,9 @@ class CompareView(QWidget):
 
     def set_busy(self, busy: bool) -> None:
         self.setEnabled(not busy)
+
+    def set_verify_available(self, available: bool) -> None:
+        self._verify.setEnabled(available)
+
+    def verify_enabled(self) -> bool:
+        return self._verify.isEnabled()

@@ -34,8 +34,7 @@ class ListenerBridge(QObject):
                 version = session.dot_version(timeout=30)
             except (ConnectionError, TimeoutError):
                 version = None
-            if version is not None:
-                self._emit(self.dot_version, version)
+            self._emit(self.dot_version, "" if version is None else version)  # "": no answer to `Y`
             while not self._stop and not session.wait_closed(timeout=0.2):
                 pass
             self._emit(self.session_ended)
