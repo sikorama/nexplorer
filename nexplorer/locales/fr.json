@@ -43,9 +43,11 @@
   "Identical": "Identique",
   "Not scanned": "Non analysé",
   "Scan all": "Tout analyser",
+  "Unverified": "Non vérifié",
   "Direction": "Sens",
   "Reverse direction": "Inverser le sens",
   "Transfer this file": "Transférer ce fichier",
   "Apply": "Appliquer",
+  "Verify": "Vérifier",
   "Back to the panes": "Retour aux volets"
 }

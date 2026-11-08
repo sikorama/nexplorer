@@ -55,7 +55,7 @@ def test_expanding_a_folder_lists_its_next_level_with_the_same_states_and_propos
     assert [(r.name, r.state, r.direction, r.checked) for r in sorted(games.children, key=lambda r: r.name)] == [
         ("deep", "not-scanned", None, False),
         ("down.tap", "only-next", "to-local", True),
-        ("same.tap", "identical", None, False),
+        ("same.tap", "unverified", None, False),
         ("up.tap", "only-local", "to-next", True),
     ]
     assert games.state == "not-scanned"  # deep is still unknown
@@ -76,7 +76,7 @@ def test_scan_all_expands_the_whole_tree_and_a_folder_is_identical_only_when_all
     nxt.drop()
 
 
-def test_a_scanned_folder_whose_content_is_identical_is_identical(listener, tmp_path):
+def test_a_scanned_folder_of_same_size_files_is_unverified_not_identical(listener, tmp_path):
     (tmp_path / "games").mkdir()
     (tmp_path / "games" / "a.tap").write_bytes(b"aa")
     nxt, session = _session_with(listener, {"d:/dest": None, "d:/dest/games": None, "d:/dest/games/a.tap": b"aa"})
@@ -84,7 +84,7 @@ def test_a_scanned_folder_whose_content_is_identical_is_identical(listener, tmp_
 
     scan_all(session, rows, str(tmp_path), "d:/dest")
 
-    assert row(rows, "games").state == "identical"
+    assert row(rows, "games").state == "unverified"
     nxt.drop()
 
 

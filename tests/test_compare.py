@@ -24,10 +24,10 @@ def test_files_of_different_size_are_different_unchecked_and_without_direction()
     assert (r.state, r.direction, r.checked) == ("different", None, False)
 
 
-def test_files_of_the_same_size_are_identical_and_have_nothing_to_transfer():
+def test_files_of_the_same_size_are_unverified_and_have_nothing_to_transfer():
     rows = compare_level([Entry("d.tap", False, 10)], [Entry("d.tap", False, 10)])
     r = row(rows, "d.tap")
-    assert (r.state, r.direction, r.checked) == ("identical", None, False)
+    assert (r.state, r.direction, r.checked) == ("unverified", None, False)
 
 
 def test_reversing_a_row_flips_its_direction_and_a_row_can_be_checked_or_unchecked():
@@ -49,7 +49,7 @@ def test_a_different_row_gets_a_direction_when_the_user_first_reverses_it():
 
 import pytest
 
-from nexplorer.compare import apply
+from nexplorer.compare import apply, verify
 from nexplorer.protocol import Listener
 from tests.fake_next import FakeNext
 
@@ -128,3 +128,33 @@ def test_a_reversed_one_sided_row_has_no_source_so_nothing_moves_and_nothing_is_
 def test_a_folder_on_both_sides_is_not_scanned_and_has_nothing_to_transfer():
     r = row(compare_level([Entry("games", True, 0)], [Entry("games", True, 0)]), "games")
     assert (r.state, r.direction, r.checked, r.children) == ("not-scanned", None, False, None)
+
+
+def test_verify_asks_the_next_for_the_crc_of_same_size_files_only_and_settles_each_row(listener, tmp_path):
+    (tmp_path / "ok.tap").write_bytes(b"abcd")
+    (tmp_path / "bad.tap").write_bytes(b"abcd")
+    (tmp_path / "size.tap").write_bytes(b"abc")
+    (tmp_path / "up.tap").write_bytes(b"up")
+    nxt, session = _session_with(
+        listener,
+        fs={
+            "d:/dest": None,
+            "d:/dest/ok.tap": b"abcd",
+            "d:/dest/bad.tap": b"abce",
+            "d:/dest/size.tap": b"abcde",
+            "d:/dest/down.tap": b"down",
+        },
+    )
+    rows = _rows(tmp_path, nxt.fs)
+    assert b"K" not in nxt.commands  # nothing is asked before the user asks
+
+    result = verify(session, str(tmp_path), "d:/dest", rows)
+
+    assert result.failures == []
+    assert nxt.commands.count(b"K") == 2  # ok.tap and bad.tap, not size.tap nor the one-sided files
+    assert [(r.name, r.state) for r in rows if r.name in ("ok.tap", "bad.tap", "size.tap")] == [
+        ("bad.tap", "different"),
+        ("ok.tap", "identical"),
+        ("size.tap", "different"),
+    ]
+    nxt.drop()
