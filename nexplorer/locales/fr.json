@@ -35,5 +35,15 @@
   "Show hidden files": "Afficher les fichiers cachés",
   "Verify the CRC after each upload": "Vérifier le CRC après chaque envoi",
   "Language": "Langue",
-  "Session lost, operation stopped": "Session perdue, opération arrêtée"
+  "Session lost, operation stopped": "Session perdue, opération arrêtée",
+  "Compare": "Comparer",
+  "Only on Local": "Seulement en Local",
+  "Only on the Next": "Seulement sur la Next",
+  "Different": "Différent",
+  "Identical": "Identique",
+  "Direction": "Sens",
+  "Reverse direction": "Inverser le sens",
+  "Transfer this file": "Transférer ce fichier",
+  "Apply": "Appliquer",
+  "Back to the panes": "Retour aux volets"
 }

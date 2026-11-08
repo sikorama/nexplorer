@@ -28,10 +28,12 @@ from PySide6.QtWidgets import (
 
 from nexplorer import settings as settings_store
 from nexplorer.i18n import available_languages, set_language, tr
+from nexplorer.compare import Row, apply as apply_rows, compare_level
 from nexplorer.protocol import Listener
 from nexplorer.transfer import Result, copy, is_plain_name, make_folder, move, receive, remove, rename, send
 from nexplorer.settings import Settings
 from nexplorer.ui.bridge import ListenerBridge
+from nexplorer.ui.compare_view import CompareView
 from nexplorer.ui.panes import LocalPane, NextPane
 
 SYNC_COMMAND = ".sync5 -l"
@@ -50,6 +52,11 @@ def local_ipv4_addresses() -> list[tuple[str, str]]:
             if addr.protocol() == QAbstractSocket.IPv4Protocol:
                 found.append((iface.humanReadableName(), addr.toString()))
     return found
+
+
+def _one_row(row):
+    """The row as if it were checked: a single transfer ignores the checkbox."""
+    return Row(row.name, row.state, row.direction, True, row.local, row.remote)
 
 
 def _ask_name_dialog(title: str, initial: str = "") -> str | None:
@@ -144,6 +151,12 @@ class MainWindow(QMainWindow):
         row = QHBoxLayout()
         row.addWidget(self._pane(tr("Local"), self._local_pane))
         row.addWidget(self._pane(tr("Next"), self._stack))
+        panes_page = QWidget()
+        panes_page.setLayout(row)
+        self._compare_view = CompareView()
+        self._views = QStackedWidget()
+        self._views.addWidget(panes_page)
+        self._views.addWidget(self._compare_view)
 
         self._send = QPushButton(tr("Send \u2192"))
         self._send.clicked.connect(self.send_selected)
@@ -159,6 +172,8 @@ class MainWindow(QMainWindow):
         self._cut.clicked.connect(self.cut_selected)
         self._paste = QPushButton(tr("Paste on Next"))
         self._paste.clicked.connect(self.paste)
+        self._compare = QPushButton(tr("Compare"))
+        self._compare.clicked.connect(self.compare)
         self._delete = QPushButton(tr("Delete on Next"))
         self._delete.clicked.connect(self.delete_selected)
         actions = QHBoxLayout()
@@ -170,6 +185,7 @@ class MainWindow(QMainWindow):
         actions.addWidget(self._cut)
         actions.addWidget(self._paste)
         actions.addWidget(self._delete)
+        actions.addWidget(self._compare)
         actions.addStretch(1)
         self._settings_button = QPushButton(tr("Settings"))
         self._settings_button.clicked.connect(self.open_settings)
@@ -210,7 +226,7 @@ class MainWindow(QMainWindow):
 
         column = QVBoxLayout(root)
         column.addLayout(actions)
-        column.addLayout(row, 1)
+        column.addWidget(self._views, 1)
         column.addWidget(self._summary)
         column.addWidget(self._op_row)
         self.setCentralWidget(root)
@@ -223,6 +239,9 @@ class MainWindow(QMainWindow):
         self._bridge = ListenerBridge(listener)
         self._bridge.session_started.connect(self._show_connected)
 
+        self._compare_view.transfer_requested.connect(self.compare_transfer)
+        self._compare_view.apply_requested.connect(self.compare_apply)
+        self._compare_view.back_requested.connect(self.compare_back)
         self._next_pane.files_dropped.connect(self.drop_files)
         self._local_pane.next_entries_dropped.connect(lambda names, _row: self.drop_next_entries(names))
         self._next_pane.entries_moved.connect(self.move_dropped)
@@ -374,6 +393,58 @@ class MainWindow(QMainWindow):
         if self._confirm_delete(message):
             self._run(lambda progress, cancel: remove(session, folder, entries, progress, cancel))
 
+    # -- compare
+    def compare(self) -> None:
+        """Replace the panes with the Differences between the two folders they show."""
+        session = self._next_pane.session()
+        local_dir, next_dir = self._local_pane.path(), self._next_pane.path()
+        if not session or not local_dir or not next_dir or self._busy:
+            return
+        rows = compare_level(self._shown(self._local_pane), self._shown(self._next_pane))
+        self._compare_view.show_rows(f"{local_dir}  \u2194  {next_dir}", rows)
+        self._views.setCurrentWidget(self._compare_view)
+        self._update_actions()
+
+    def _shown(self, pane) -> list:
+        hidden = self._settings.show_hidden
+        return [e for e in pane.entries() if hidden or not e.name.startswith(".")]
+
+    def compare_back(self) -> None:
+        self._views.setCurrentIndex(0)
+        self._update_actions()
+
+    def compare_transfer(self, name: str) -> None:
+        """Transfer one row on its own, whatever its checkbox."""
+        row = self._compare_view.row(name)
+        self._apply_rows([_one_row(row)])
+
+    def compare_apply(self) -> None:
+        """Transfer every checked row, one after the other."""
+        self._apply_rows(self._compare_view.rows())
+
+    def _apply_rows(self, rows: list) -> None:
+        session = self._next_pane.session()
+        local_dir, next_dir = self._local_pane.path(), self._next_pane.path()
+        verify = self._settings.crc_after_upload
+        if session and local_dir and next_dir:
+            self._run(
+                lambda progress, cancel: apply_rows(
+                    session, local_dir, next_dir, rows, progress, cancel, verify_crc=verify
+                )
+            )
+
+    def compare_reverse(self, name: str) -> None:
+        self._compare_view.reverse(name)
+
+    def compare_set_checked(self, name: str, checked: bool) -> None:
+        self._compare_view.set_checked(name, checked)
+
+    def compare_active(self) -> bool:
+        return self._views.currentWidget() is self._compare_view
+
+    def compare_rows(self) -> list[tuple[str, str, str, bool]]:
+        return [(r.name, r.state, r.direction or "", r.checked) for r in self._compare_view.rows()]
+
     def _run(self, work: Callable) -> None:
         """Run one modifying operation off the UI thread; only one at a time."""
         if self._busy:
@@ -468,6 +539,8 @@ class MainWindow(QMainWindow):
         self._cut.setEnabled(enabled and selected >= 1)
         self._paste.setEnabled(enabled and self._clipboard is not None)
         self._disconnect.setEnabled(connected and not self._disconnecting)
+        self._compare.setEnabled(enabled)
+        self._compare_view.set_busy(self._busy)
         self._next_pane.setEnabled(not self._busy)  # the serial link is busy: no queued listings
 
     # -- observation points for tests
