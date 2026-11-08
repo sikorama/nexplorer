@@ -29,7 +29,7 @@ from PySide6.QtWidgets import (
 from nexplorer import settings as settings_store
 from nexplorer.capabilities import MINIMUM_DOT, Capabilities, capabilities
 from nexplorer.i18n import available_languages, set_language, tr
-from nexplorer.compare import Row, apply as apply_rows, compare_level, verify as verify_rows
+from nexplorer.compare import Row, apply as apply_rows, compare_level, read_ignore, verify as verify_rows
 from nexplorer.protocol import Listener
 from nexplorer.transfer import Result, copy, is_plain_name, make_folder, move, receive, remove, rename, send
 from nexplorer.settings import Settings
@@ -423,14 +423,19 @@ class MainWindow(QMainWindow):
         local_dir, next_dir = self._local_pane.path(), self._next_pane.path()
         if not session or not local_dir or not next_dir or self._busy:
             return
-        rows = compare_level(self._shown(self._local_pane), self._shown(self._next_pane))
+        rows = compare_level(
+            self._local_pane.entries(),
+            self._next_pane.entries(),
+            next_dir,
+            read_ignore(local_dir),
+            self._settings.show_hidden,
+        )
         self._compare_view.show_rows(f"{local_dir}  \u2194  {next_dir}", rows)
         self._views.setCurrentWidget(self._compare_view)
         self._update_actions()
 
-    def _shown(self, pane) -> list:
-        hidden = self._settings.show_hidden
-        return [e for e in pane.entries() if hidden or not e.name.startswith(".")]
+    def compare_state_texts(self) -> dict[str, str]:
+        return self._compare_view.state_texts()
 
     def compare_back(self) -> None:
         self._views.setCurrentIndex(0)
