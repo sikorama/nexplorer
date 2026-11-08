@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import os
 import threading
+from dataclasses import replace
 from pathlib import Path
 from typing import Callable
 
@@ -27,11 +28,23 @@ from PySide6.QtWidgets import (
 )
 
 from nexplorer import settings as settings_store
+from nexplorer.capabilities import MINIMUM_DOT, Capabilities, capabilities
 from nexplorer.i18n import available_languages, set_language, tr
-from nexplorer.protocol import Listener
+from nexplorer.compare import (
+    Row,
+    apply as apply_rows,
+    compare_level,
+    read_ignore,
+    expand as expand_row,
+    scan_all,
+    recompare,
+    verify as verify_rows,
+)
+from nexplorer.protocol import Listener, RemoteError
 from nexplorer.transfer import Result, copy, is_plain_name, make_folder, move, receive, remove, rename, send
 from nexplorer.settings import Settings
 from nexplorer.ui.bridge import ListenerBridge
+from nexplorer.ui.compare_view import CompareView
 from nexplorer.ui.panes import LocalPane, NextPane
 
 SYNC_COMMAND = ".sync5 -l"
@@ -50,6 +63,12 @@ def local_ipv4_addresses() -> list[tuple[str, str]]:
             if addr.protocol() == QAbstractSocket.IPv4Protocol:
                 found.append((iface.humanReadableName(), addr.toString()))
     return found
+
+
+def _one_row(row):
+    """The row as if it were checked: a single transfer ignores the checkbox. A folder row
+    goes alone, without the rows below it."""
+    return replace(row, checked=True, children=None)
 
 
 def _ask_name_dialog(title: str, initial: str = "") -> str | None:
@@ -144,6 +163,12 @@ class MainWindow(QMainWindow):
         row = QHBoxLayout()
         row.addWidget(self._pane(tr("Local"), self._local_pane))
         row.addWidget(self._pane(tr("Next"), self._stack))
+        panes_page = QWidget()
+        panes_page.setLayout(row)
+        self._compare_view = CompareView()
+        self._views = QStackedWidget()
+        self._views.addWidget(panes_page)
+        self._views.addWidget(self._compare_view)
 
         self._send = QPushButton(tr("Send \u2192"))
         self._send.clicked.connect(self.send_selected)
@@ -159,6 +184,8 @@ class MainWindow(QMainWindow):
         self._cut.clicked.connect(self.cut_selected)
         self._paste = QPushButton(tr("Paste on Next"))
         self._paste.clicked.connect(self.paste)
+        self._compare = QPushButton(tr("Compare"))
+        self._compare.clicked.connect(self.compare)
         self._delete = QPushButton(tr("Delete on Next"))
         self._delete.clicked.connect(self.delete_selected)
         actions = QHBoxLayout()
@@ -170,6 +197,7 @@ class MainWindow(QMainWindow):
         actions.addWidget(self._cut)
         actions.addWidget(self._paste)
         actions.addWidget(self._delete)
+        actions.addWidget(self._compare)
         actions.addStretch(1)
         self._settings_button = QPushButton(tr("Settings"))
         self._settings_button.clicked.connect(self.open_settings)
@@ -196,6 +224,12 @@ class MainWindow(QMainWindow):
         op.addWidget(self._cancel_button)
         self._summary = QLabel()
         self._summary.setTextFormat(Qt.PlainText)
+        self._dot_notice = QLabel()
+        self._dot_notice.setTextFormat(Qt.PlainText)
+        self._dot_notice.hide()
+        self._capabilities = Capabilities()
+        self._fresh_rows = None  # compared rows recomputed by a transfer, shown when it ends
+        self._version_known = False
         self._op_row.hide()
         self._busy = False
         self._cancel = threading.Event()
@@ -210,8 +244,9 @@ class MainWindow(QMainWindow):
 
         column = QVBoxLayout(root)
         column.addLayout(actions)
-        column.addLayout(row, 1)
+        column.addWidget(self._views, 1)
         column.addWidget(self._summary)
+        column.addWidget(self._dot_notice)
         column.addWidget(self._op_row)
         self.setCentralWidget(root)
         self.resize(900, 500)
@@ -223,6 +258,12 @@ class MainWindow(QMainWindow):
         self._bridge = ListenerBridge(listener)
         self._bridge.session_started.connect(self._show_connected)
 
+        self._compare_view.transfer_requested.connect(self.compare_transfer)
+        self._compare_view.apply_requested.connect(self.compare_apply)
+        self._compare_view.verify_requested.connect(self.compare_verify)
+        self._compare_view.back_requested.connect(self.compare_back)
+        self._compare_view.expand_requested.connect(self.compare_expand)
+        self._compare_view.scan_all_requested.connect(self.compare_scan_all)
         self._next_pane.files_dropped.connect(self.drop_files)
         self._local_pane.next_entries_dropped.connect(lambda names, _row: self.drop_next_entries(names))
         self._next_pane.entries_moved.connect(self.move_dropped)
@@ -231,6 +272,8 @@ class MainWindow(QMainWindow):
         self._next_pane.paste_requested.connect(self.paste)
         self._bridge.session_ready.connect(self._next_pane.bind)
         self._bridge.session_ready.connect(lambda _s: self._update_actions())
+        self._bridge.dot_version.connect(self._on_dot_version)
+        self._bridge.dot_unanswered.connect(self._on_dot_unanswered)
         self._bridge.session_ended.connect(self._show_waiting)
 
     @staticmethod
@@ -243,7 +286,29 @@ class MainWindow(QMainWindow):
         col.addWidget(body, 1)
         return box
 
+    def _on_dot_version(self, version: str) -> None:
+        """The dot announced its version ("" when it did not answer `Y`): grey what it lacks."""
+        self._capabilities = capabilities(version or None)
+        self._version_known = True
+        missing = not self._capabilities.complete
+        text = tr("The dot on the Next is too old for some actions: update .sync5 to version") + f" {MINIMUM_DOT}"
+        self._dot_notice.setText(text if missing else "")
+        self._dot_notice.setVisible(missing)
+        self._update_actions()
+
+    def _on_dot_unanswered(self) -> None:
+        """`Y` got no answer in time: the dot is not proven old, so nothing is greyed."""
+        self._capabilities = Capabilities()
+        self._version_known = True
+        self._dot_notice.setText("")
+        self._dot_notice.hide()
+        self._update_actions()
+
     def _show_waiting(self) -> None:
+        self._capabilities = Capabilities()
+        self._version_known = False
+        self._dot_notice.setText("")
+        self._dot_notice.hide()
         self._clipboard = None
         self._next_pane.unbind()
         lines = [tr("Waiting for a Next"), ""]
@@ -272,14 +337,14 @@ class MainWindow(QMainWindow):
         session = self._next_pane.session()
         paths = [os.path.join(self._local_pane.path(), e.name) for e in self._local_pane.selected_entries()]
         folder = self._next_pane.path()
-        verify = self._settings.crc_after_upload
+        verify = self._settings.crc_after_upload and self._capabilities.crc
         if session and paths and folder:
             self._run(lambda progress, cancel: send(session, paths, folder, progress, cancel, verify_crc=verify))
 
     def drop_files(self, paths: list[str], subfolder: str = "") -> None:
         """Files dropped on the Next pane: send them into the folder shown, or the subfolder hit."""
         session, folder = self._next_pane.session(), self._next_pane.folder_path(subfolder)
-        verify = self._settings.crc_after_upload
+        verify = self._settings.crc_after_upload and self._capabilities.crc
         if session and paths and folder:
             self._run(lambda progress, cancel: send(session, paths, folder, progress, cancel, verify_crc=verify))
 
@@ -331,14 +396,14 @@ class MainWindow(QMainWindow):
 
     def _mark(self, mode: str) -> None:
         entries = self._next_pane.selected_entries()
-        if self._next_pane.session() is not None and entries:
+        if self._next_pane.session() is not None and entries and self._capabilities.copy:
             self._clipboard = (mode, self._next_pane.path(), entries)
             self._update_actions()
 
     def paste(self) -> None:
         """Copy or move the marked entries into the Next folder shown."""
         session, target = self._next_pane.session(), self._next_pane.path()
-        if not session or not target or self._clipboard is None or self._busy:
+        if not session or not target or self._clipboard is None or self._busy or not self._capabilities.copy:
             return
         mode, source, entries = self._clipboard
         action = move if mode == "cut" else copy
@@ -351,7 +416,7 @@ class MainWindow(QMainWindow):
         target = self._next_pane.folder_path(row) if row else ""
         wanted = set(names)
         entries = [e for e in self._next_pane.entries() if e.name in wanted]
-        if session and source and target and target != source and entries:
+        if session and source and target and target != source and entries and self._capabilities.copy:
             self._clear_clipboard_if_clean = False
             self._run(lambda progress, cancel: move(session, source, entries, target, progress, cancel))
 
@@ -373,6 +438,125 @@ class MainWindow(QMainWindow):
         )
         if self._confirm_delete(message):
             self._run(lambda progress, cancel: remove(session, folder, entries, progress, cancel))
+
+    # -- compare
+    def compare(self) -> None:
+        """Replace the panes with the Differences between the two folders they show."""
+        session = self._next_pane.session()
+        local_dir, next_dir = self._local_pane.path(), self._next_pane.path()
+        if not session or not local_dir or not next_dir or self._busy:
+            return
+        rows = compare_level(
+            self._local_pane.entries(),
+            self._next_pane.entries(),
+            next_dir,
+            read_ignore(local_dir),
+            self._settings.show_hidden,
+        )
+        self._compare_view.show_rows(f"{local_dir}  \u2194  {next_dir}", rows)
+        self._views.setCurrentWidget(self._compare_view)
+        self._update_actions()
+
+    def compare_state_texts(self) -> dict[str, str]:
+        return self._compare_view.state_texts()
+
+    def compare_back(self) -> None:
+        self._views.setCurrentIndex(0)
+        self._update_actions()
+
+    def compare_transfer(self, name: str) -> None:
+        """Transfer one row on its own, whatever its checkbox."""
+        row = self._compare_view.row(name)
+        *parents, _ = name.split("/")
+        local_dir, next_dir = self._local_pane.path(), self._next_pane.path()
+        if local_dir and next_dir:
+            self._apply_rows(
+                [_one_row(row)], os.path.join(local_dir, *parents), "/".join([next_dir.rstrip("/"), *parents])
+            )
+
+    def compare_apply(self) -> None:
+        """Transfer every checked row, one after the other."""
+        self._apply_rows(self._compare_view.rows(), self._local_pane.path(), self._next_pane.path())
+
+    def compare_verify(self) -> None:
+        """Ask the Next for the CRC-32 of the same-size files and settle their rows."""
+        session = self._next_pane.session()
+        local_dir, next_dir = self._local_pane.path(), self._next_pane.path()
+        rows = self._compare_view.rows()
+        if session and local_dir and next_dir and self._capabilities.crc:
+            self._run(lambda _progress, cancel: verify_rows(session, local_dir, next_dir, rows, cancel))
+
+    def _apply_rows(self, rows: list, local_dir: str, next_dir: str) -> None:
+        """Transfer `rows`, which live in the given folders, then recompute the compared rows."""
+        session = self._next_pane.session()
+        top_local, top_next = self._local_pane.path(), self._next_pane.path()
+        verify = self._settings.crc_after_upload and self._capabilities.crc
+        hidden, ignore = self._settings.show_hidden, read_ignore(top_local) if top_local else []
+        shown = self._compare_view.rows()
+        if session and local_dir and next_dir and top_local and top_next:
+
+            def work(progress, cancel):
+                result = apply_rows(session, local_dir, next_dir, rows, progress, cancel, verify_crc=verify)
+                try:
+                    self._fresh_rows = recompare(session, shown, top_local, top_next, hidden, ignore)
+                except (OSError, RemoteError, ConnectionError, TimeoutError):
+                    pass  # the rows stay as they were
+                return result
+
+            self._run(work)
+
+    def compare_expand(self, path: str) -> None:
+        """List the next level of a not scanned folder, given as a path from the compared folders."""
+        session = self._next_pane.session()
+        local_dir, next_dir = self._local_pane.path(), self._next_pane.path()
+        if not session or not local_dir or not next_dir or self._busy:
+            return
+        *parents, _ = path.split("/")
+        row = self._compare_view.row(path)
+        local_dir, next_dir = os.path.join(local_dir, *parents), "/".join([next_dir.rstrip("/"), *parents])
+        hidden, ignore = self._settings.show_hidden, read_ignore(self._local_pane.path())
+
+        def work(progress, cancel):
+            expand_row(session, row, local_dir, next_dir, hidden, ignore)
+            return Result()
+
+        self._run(work)
+
+    def compare_scan_all(self) -> None:
+        """Expand the whole tree, with progress; Cancel leaves the unreached folders not scanned."""
+        session = self._next_pane.session()
+        local_dir, next_dir = self._local_pane.path(), self._next_pane.path()
+        if not session or not local_dir or not next_dir or self._busy:
+            return
+        rows, hidden = self._compare_view.rows(), self._settings.show_hidden
+        ignore = read_ignore(local_dir)
+        self._run(
+            lambda progress, cancel: scan_all(session, rows, local_dir, next_dir, progress, cancel, hidden, ignore)
+        )
+
+    def compare_states(self) -> list[tuple[str, str]]:
+        """(path, state) of every row shown, nested ones included."""
+        found: list[tuple[str, str]] = []
+
+        def walk(rows, prefix):
+            for r in rows:
+                found.append((prefix + r.name, r.state))
+                walk(r.children or [], prefix + r.name + "/")
+
+        walk(self._compare_view.rows(), "")
+        return found
+
+    def compare_reverse(self, name: str) -> None:
+        self._compare_view.reverse(name)
+
+    def compare_set_checked(self, name: str, checked: bool) -> None:
+        self._compare_view.set_checked(name, checked)
+
+    def compare_active(self) -> bool:
+        return self._views.currentWidget() is self._compare_view
+
+    def compare_rows(self) -> list[tuple[str, str, str, bool]]:
+        return [(r.name, r.state, r.direction or "", r.checked) for r in self._compare_view.rows()]
 
     def _run(self, work: Callable) -> None:
         """Run one modifying operation off the UI thread; only one at a time."""
@@ -452,6 +636,10 @@ class MainWindow(QMainWindow):
             self._summary.setText(f"{tr('Failed')}: {outcome}")
         self._next_pane.reload()
         self._local_pane.reload()
+        if self._fresh_rows is not None:
+            self._compare_view.set_rows(self._fresh_rows)
+            self._fresh_rows = None
+        self._compare_view.refresh()
         self._update_actions()
 
     def _update_actions(self) -> None:
@@ -462,17 +650,30 @@ class MainWindow(QMainWindow):
         self._send.setEnabled(enabled)
         self._receive.setEnabled(enabled)
         self._new_folder.setEnabled(enabled)
-        self._rename.setEnabled(enabled and selected == 1)
+        self._rename.setEnabled(enabled and self._capabilities.rename and selected == 1)
         self._delete.setEnabled(enabled and selected >= 1)
-        self._copy.setEnabled(enabled and selected >= 1)
-        self._cut.setEnabled(enabled and selected >= 1)
-        self._paste.setEnabled(enabled and self._clipboard is not None)
+        can_copy = self._capabilities.copy
+        self._copy.setEnabled(enabled and can_copy and selected >= 1)
+        self._cut.setEnabled(enabled and can_copy and selected >= 1)
+        self._paste.setEnabled(enabled and can_copy and self._clipboard is not None)
         self._disconnect.setEnabled(connected and not self._disconnecting)
+        self._compare.setEnabled(enabled)
+        self._compare_view.set_busy(self._busy)
+        self._compare_view.set_verify_available(self._capabilities.crc)
         self._next_pane.setEnabled(not self._busy)  # the serial link is busy: no queued listings
 
     # -- observation points for tests
     def operation_running(self) -> bool:
         return self._busy
+
+    def dot_notice(self) -> str:
+        return self._dot_notice.text()
+
+    def dot_version_known(self) -> bool:
+        return self._version_known
+
+    def compare_verify_enabled(self) -> bool:
+        return self._compare_view.verify_enabled()
 
     def delete_enabled(self) -> bool:
         return self._delete.isEnabled()
