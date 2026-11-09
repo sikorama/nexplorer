@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QBrush, QPalette
+from PySide6.QtGui import QBrush, QColor, QPalette
 from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
@@ -16,8 +16,18 @@ from PySide6.QtWidgets import (
 from nexplorer.compare import BLOCKED, Row
 from nexplorer.i18n import tr
 from nexplorer.protocol import Entry
+from nexplorer.ui import icons, theme
 from nexplorer.ui.panes import format_size
 
+# The icon of each button, from the embedded set.
+BUTTON_ICONS = {
+    "reverse": "arrow-up-down",
+    "one": "upload",
+    "scan_all": "refresh-cw",
+    "verify": "check-check",
+    "apply": "git-compare",
+    "back": "folder",
+}
 _ARROWS = {"to-next": "→", "to-local": "←", None: ""}
 
 
@@ -53,6 +63,8 @@ class CompareView(QWidget):
     def __init__(self):
         super().__init__()
         self._rows: list[Row] = []
+        self._theme = "light"
+        self._colour: QColor | None = None
         self._title = QLabel()
         self._title.setTextFormat(Qt.PlainText)
         self._tree = QTreeWidget()
@@ -71,6 +83,10 @@ class CompareView(QWidget):
         self._apply.clicked.connect(self.apply_requested)
         self._back = QPushButton(tr("Back to the panes"))
         self._back.clicked.connect(self.back_requested)
+        self._buttons = {
+            "reverse": self._reverse, "one": self._one, "scan_all": self._scan_all,
+            "verify": self._verify, "apply": self._apply, "back": self._back,
+        }  # fmt: skip
         buttons = QHBoxLayout()
         for b in (self._reverse, self._one, self._scan_all, self._verify, self._apply):
             buttons.addWidget(b)
@@ -80,6 +96,28 @@ class CompareView(QWidget):
         col.addWidget(self._title)
         col.addWidget(self._tree, 1)
         col.addLayout(buttons)
+
+    def set_theme(self, name: str) -> None:
+        """Colour the State column from the palette `name` (light or dark)."""
+        self._theme = name
+        self._fill()
+
+    def set_icon_colour(self, colour) -> None:
+        """Tint the button icons (None: the palette text colour)."""
+        self._colour = QColor(colour) if colour is not None else None
+        for key, button in self._buttons.items():
+            button.setIcon(icons.icon(BUTTON_ICONS[key], self._colour))
+
+    def state_colour(self, path: str) -> QColor | None:
+        """The colour the State of the row at `path` is drawn in, None for the default colour."""
+        stack = [self._tree.topLevelItem(i) for i in range(self._tree.topLevelItemCount())]
+        while stack:
+            item = stack.pop()
+            if item.data(1, Qt.UserRole) == path:
+                brush = item.foreground(5)
+                return brush.color() if brush.style() != Qt.NoBrush else None
+            stack += [item.child(i) for i in range(item.childCount())]
+        raise KeyError(path)
 
     def show_rows(self, title: str, rows: list[Row]) -> None:
         self._title.setText(title)
@@ -122,6 +160,9 @@ class CompareView(QWidget):
             if r.state in BLOCKED:
                 self._mark_blocked(item, r.state)
             else:
+                colour = theme.state_colour(self._theme, r.state)
+                if colour is not None:
+                    item.setForeground(5, QBrush(colour))
                 item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
                 item.setCheckState(0, Qt.Checked if r.checked else Qt.Unchecked)
             parent.addChild(item)
