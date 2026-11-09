@@ -6,10 +6,13 @@ import shutil
 import threading
 from typing import Callable, Protocol
 
-from PySide6.QtCore import QEvent, QMimeData, QObject, Qt, Signal
+from PySide6.QtCore import QEvent, QFileInfo, QMimeData, QObject, Qt, Signal
+from PySide6.QtGui import QColor, QIcon
+
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QComboBox,
+    QFileIconProvider,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -25,6 +28,7 @@ from nexplorer.i18n import tr
 from nexplorer.listing import sort_entries
 from nexplorer.local_roots import Root, local_roots
 from nexplorer.protocol import Entry, RemoteError, Session
+from nexplorer.ui import icons
 
 
 def format_size(size: int) -> str:
@@ -175,6 +179,8 @@ class FolderPane(QWidget):
 
         self._tree = _Tree()
         self._tree.setRootIsDecorated(False)
+        self._tree.setAlternatingRowColors(True)
+        self._icon_colour: QColor | None = None  # None: the palette text colour
         self._tree.setHeaderLabels([tr("Name"), tr("Size"), tr("Type")])
         self._tree.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self._tree.header().setSectionsClickable(True)
@@ -378,7 +384,17 @@ class FolderPane(QWidget):
                 continue
             row = QTreeWidgetItem([e.name, "" if e.is_dir else format_size(e.size), type_label(e)])
             row.setData(0, Qt.UserRole, e.is_dir)
+            row.setIcon(0, self._row_icon(e))
             self._tree.addTopLevelItem(row)
+
+    def _row_icon(self, entry: Entry) -> QIcon:
+        """The icon of a row: the embedded set by type (a subclass may use the system's)."""
+        return icons.icon(icons.next_icon_name(entry), self._icon_colour)
+
+    def set_icon_colour(self, colour: QColor | str | None) -> None:
+        """Tint the row icons (None: the palette text colour) and redraw the rows."""
+        self._icon_colour = QColor(colour) if colour is not None else None
+        self._fill()
 
     def drag_mime(self) -> QMimeData:
         """What a drag of the selected rows carries (also used by tests)."""
@@ -422,11 +438,17 @@ class LocalPane(FolderPane):
     def __init__(self, path: str, roots: Callable[[], list[Root]] = local_roots):
         self._roots_source = roots
         self._roots: list[Root] = []
+        self._icon_provider = QFileIconProvider()
         super().__init__(LocalBackend(), path, tr("Local"))
         self._tree.accept_next_entries = True
         self._tree.setAcceptDrops(True)
         self.next_entries_dropped = self._tree.next_entries_dropped
         self.open_drive_selector()
+
+    def _row_icon(self, entry: Entry) -> QIcon:
+        """Local rows show the file icons of the system."""
+        info = QFileInfo(self._backend.join(self._path, entry.name))
+        return self._icon_provider.icon(info)
 
     def open_drive_selector(self) -> None:
         """Read the roots again (a card may have been plugged in) and mark the one holding the folder."""

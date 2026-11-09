@@ -29,6 +29,7 @@ from PySide6.QtWidgets import (
     QSplitter,
     QStackedWidget,
     QStyle,
+    QToolBar,
     QVBoxLayout,
     QWidget,
 )
@@ -53,6 +54,7 @@ from nexplorer.transfer import Result, copy, is_plain_name, make_folder, move, r
 from nexplorer.settings import Settings
 from nexplorer.ui.actions import LOCAL, NEXT, Binding, SharedActions
 from nexplorer.ui.bridge import ListenerBridge
+from nexplorer.ui import icons
 from nexplorer.ui.compare_view import CompareView
 from nexplorer.ui.panes import LocalPane, NextPane, format_size
 
@@ -216,6 +218,8 @@ class MainWindow(QMainWindow):
         self._actions = SharedActions(self, lambda: self._active)
         self._define_actions()
         self._build_menus()
+        self._build_toolbar()
+        self.set_icon_colour(None)
 
         self._op_label = QLabel()
         self._op_bar = QProgressBar()
@@ -381,6 +385,39 @@ class MainWindow(QMainWindow):
                         sub.addAction(a(sort_key))
                 else:
                     menu.addAction(a(key))
+
+    def _build_toolbar(self) -> None:
+        """The frequent actions under the menu bar: the shared actions themselves, so labels,
+        shortcuts and enablement are those of the menus."""
+        self._toolbar = QToolBar(tr("Toolbar"), self)
+        self._toolbar.setObjectName("toolbar")
+        self._toolbar.setMovable(False)
+        self._toolbar.setToolButtonStyle(Qt.ToolButtonIconOnly)
+        for key in icons.TOOLBAR_ACTIONS:
+            if key is None:
+                self._toolbar.addSeparator()
+            else:
+                self._toolbar.addAction(self._actions.action(key))
+        self.addToolBar(Qt.TopToolBarArea, self._toolbar)
+
+    def set_icon_colour(self, colour) -> None:
+        """Tint every icon (actions and list rows) with `colour`; None for the palette text colour."""
+        for key, name in icons.ACTION_ICONS.items():
+            self._actions.action(key).setIcon(icons.icon(name, colour))
+        self._local_pane.set_icon_colour(colour)
+        self._next_pane.set_icon_colour(colour)
+
+    def toolbar_action_keys(self) -> list[str | None]:
+        """The shared action behind each toolbar button (None for a separator)."""
+        by_object = {id(self._actions.action(k)): k for k in icons.ACTION_ICONS}
+        return [None if a.isSeparator() else by_object[id(a)] for a in self._toolbar.actions()]
+
+    def toolbar_entries(self) -> list[tuple[str, bool, bool]]:
+        """(tooltip text, enabled, has an icon) of each toolbar button."""
+        return [(a.text(), a.isEnabled(), not a.icon().isNull()) for a in self._toolbar.actions() if not a.isSeparator()]
+
+    def menu_entry_has_icon(self, title: str, label: str) -> bool:
+        return not next(a for a in self._menu(title).actions() if a.text() == label).icon().isNull()
 
     def _pane(self, side: str):
         return self._local_pane if side == LOCAL else self._next_pane
