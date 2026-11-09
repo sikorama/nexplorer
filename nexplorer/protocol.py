@@ -4,6 +4,7 @@ from __future__ import annotations
 import os
 import queue
 import socket
+import sys
 import threading
 import time
 from typing import Callable
@@ -70,7 +71,12 @@ class Listener:
 
     def start(self) -> None:
         self._server = socket.socket()
-        self._server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        if sys.platform == "win32":
+            # SO_REUSEADDR would let a second listener share a port another program
+            # holds, so the "Cannot listen" error would never be raised.
+            self._server.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+        else:
+            self._server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         self._server.bind((self._host, self._port))
         self._server.listen(4)
         self._thread = threading.Thread(target=self._accept_loop, daemon=True)

@@ -1,8 +1,9 @@
 import signal
 import sys
+from collections.abc import Callable
 
 from PySide6.QtCore import QTimer
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QMessageBox
 
 from nexplorer import settings
 from nexplorer.i18n import set_language, tr
@@ -23,15 +24,22 @@ def close_on_signals(app: QApplication, window: MainWindow) -> QTimer:
     return timer
 
 
-def main() -> int:
+def _error_dialog(message: str) -> None:
+    QMessageBox.critical(None, "nexplorer", message)
+
+
+def main(show_error: Callable[[str], None] = _error_dialog) -> int:
     path = settings.config_path()
     set_language(settings.load(path).language)
-    app = QApplication(sys.argv)
+    app = QApplication.instance() or QApplication(sys.argv)
     listener = Listener(port=PORT)
     try:
         listener.start()
     except OSError as e:
-        print(f"{tr('Cannot listen on port')} {PORT}: {e}", file=sys.stderr)
+        listener.stop()  # closes the socket opened before the failed bind
+        message = f"{tr('Cannot listen on port')} {PORT}: {e}"
+        print(message, file=sys.stderr)
+        show_error(message)  # packaged builds have no console
         return 1
     window = MainWindow(listener, settings_path=path)
     window.show()

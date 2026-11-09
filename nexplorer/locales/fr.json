@@ -86,5 +86,6 @@
   "Refresh": "Actualiser",
   "About": "À propos",
   "A file manager for the SD card of a ZX Spectrum Next, driven over Wi-Fi.": "Un gestionnaire de fichiers pour la carte SD d'un ZX Spectrum Next, piloté en Wi-Fi.",
-  "Toolbar": "Barre d'outils"
+  "Toolbar": "Barre d'outils",
+  "Cannot listen on port": "Impossible d'écouter sur le port"
 }
