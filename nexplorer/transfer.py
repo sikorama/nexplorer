@@ -8,7 +8,7 @@ from __future__ import annotations
 import os
 import zlib
 from dataclasses import dataclass, field
-from typing import Callable
+from typing import Callable, Iterable
 
 from nexplorer.protocol import Cancelled, Entry, RemoteError, Session, Unanswered
 
@@ -44,6 +44,7 @@ class _Job:
     ):
         self.session, self.timeout, self.verify_crc = session, timeout, verify_crc
         self.result = Result()
+        self.skip: set[str] = set()  # destination paths left out (see send and receive)
         self._progress, self._cancel = progress, cancel
         self._total, self._done = total, 0
 
@@ -83,12 +84,15 @@ def send(
     cancel: Callable[[], bool] | None = None,
     timeout: float = 60,
     verify_crc: bool = False,
+    skip: Iterable[str] = (),
 ) -> Result:
-    """Upload files and folders (recursively) into `next_dir` on the Next.
+    """Upload files and folders (recursively) into `next_dir` on the Next, leaving out
+    the files whose Next path is in `skip` (compared ignoring case).
 
     Sizes are always checked; `verify_crc` adds a CRC-32 check of each file (slow: the Next
     reads every file back, about 30 s per MB)."""
     job = _Job(session, progress, cancel, timeout, sum(_local_size(p) for p in local_paths), verify_crc)
+    job.skip = {p.lower().rstrip("/") for p in skip}
     try:
         _send_entries(job, next_dir, local_paths, ())
     except _Stop:
@@ -112,6 +116,8 @@ def _split(job: _Job, folder: str, paths: list[str], ancestors: tuple[str, ...])
     ordered = [p for p in paths if not os.path.isdir(p)] + [p for p in paths if os.path.isdir(p)]
     for path in ordered:
         name, is_dir = _base(path), os.path.isdir(path)
+        if _join(folder, name).lower() in job.skip:
+            continue
         if name.lower() in taken:
             job.fail(
                 _join(folder, name),
@@ -252,11 +258,14 @@ def receive(
     progress: Progress | None = None,
     cancel: Callable[[], bool] | None = None,
     timeout: float = 60,
+    skip: Iterable[str] = (),
 ) -> Result:
-    """Download Next entries (folders recursively) from `next_dir` into `local_dir`.
+    """Download Next entries (folders recursively) from `next_dir` into `local_dir`,
+    leaving out the Local paths in `skip`.
 
     Cancel is honoured between files: the dot cannot be told to stop a get."""
     job = _Job(session, progress, cancel, timeout, 0)
+    job.skip = {os.path.normcase(p) for p in skip}
     try:
         nodes = _scan(job, next_dir, entries)  # one listing per folder, so the total is known
         job.set_total(sum(_file_bytes(n) for n in nodes))
@@ -303,6 +312,8 @@ def _download(job: _Job, folder: str, nodes: list[_Node], local: str) -> None:
             job.fail(source, f"unsafe name {entry.name!r}: not received")
             continue
         target = os.path.join(local, entry.name)
+        if os.path.normcase(target) in job.skip:
+            continue
         try:
             if entry.is_dir:
                 if node.error:
