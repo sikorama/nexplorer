@@ -28,7 +28,6 @@ from PySide6.QtWidgets import (
     QPushButton,
     QSplitter,
     QStackedWidget,
-    QStyle,
     QToolBar,
     QVBoxLayout,
     QWidget,
@@ -51,10 +50,10 @@ from nexplorer.compare import (
 from nexplorer.local_roots import Root, local_roots
 from nexplorer.protocol import Listener, RemoteError
 from nexplorer.transfer import Result, copy, is_plain_name, make_folder, move, receive, remove, rename, send
-from nexplorer.settings import Settings
+from nexplorer.settings import THEMES, Settings
 from nexplorer.ui.actions import LOCAL, NEXT, Binding, SharedActions
 from nexplorer.ui.bridge import ListenerBridge
-from nexplorer.ui import icons
+from nexplorer.ui import icons, theme
 from nexplorer.ui.compare_view import CompareView
 from nexplorer.ui.panes import LocalPane, NextPane, format_size
 
@@ -125,6 +124,10 @@ def _about_dialog() -> None:
     )
 
 
+def _theme_label(code: str) -> str:
+    return {"light": tr("Light"), "dark": tr("Dark"), "system": tr("System")}[code]
+
+
 def _settings_dialog(current: Settings) -> Settings | None:
     dialog = QDialog()
     dialog.setWindowTitle(tr("Settings"))
@@ -135,6 +138,10 @@ def _settings_dialog(current: Settings) -> Settings | None:
     language = QComboBox()
     language.addItems(available_languages())
     language.setCurrentText(current.language)
+    theme_box = QComboBox()
+    for code in THEMES:
+        theme_box.addItem(_theme_label(code), code)
+    theme_box.setCurrentIndex(THEMES.index(current.theme))
     buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
     buttons.accepted.connect(dialog.accept)
     buttons.rejected.connect(dialog.reject)
@@ -142,6 +149,7 @@ def _settings_dialog(current: Settings) -> Settings | None:
     form.addRow(hidden)
     form.addRow(crc)
     form.addRow(tr("Language"), language)
+    form.addRow(tr("Theme"), theme_box)
     form.addRow(buttons)
     if dialog.exec() != QDialog.Accepted:
         return None
@@ -151,8 +159,12 @@ def _settings_dialog(current: Settings) -> Settings | None:
             "show_hidden": hidden.isChecked(),
             "crc_after_upload": crc.isChecked(),
             "language": language.currentText(),
+            "theme": theme_box.currentData(),
         }
     )
+
+
+CARD_ICON = "gamepad-2"  # the waiting card's icon
 
 
 class _Operation(QObject):
@@ -174,8 +186,11 @@ class MainWindow(QMainWindow):
         ask_settings: Callable[[Settings], Settings | None] = _settings_dialog,
         local_roots: Callable[[], list[Root]] = local_roots,
         show_about: Callable[[], None] = _about_dialog,
+        color_scheme: Callable[[], Qt.ColorScheme] = theme.system_scheme,
     ):
         super().__init__()
+        self._color_scheme = color_scheme
+        self._theme_name = "light"
         self._show_about = show_about
         self._active = LOCAL  # the pane that last had focus: the actions apply to it
         # Without a path nothing is read or written (tests, throwaway windows).
@@ -219,7 +234,8 @@ class MainWindow(QMainWindow):
         self._define_actions()
         self._build_menus()
         self._build_toolbar()
-        self.set_icon_colour(None)
+        self.refresh_theme()
+        QApplication.styleHints().colorSchemeChanged.connect(self._on_scheme_changed)
 
         self._op_label = QLabel()
         self._op_bar = QProgressBar()
@@ -400,12 +416,28 @@ class MainWindow(QMainWindow):
                 self._toolbar.addAction(self._actions.action(key))
         self.addToolBar(Qt.TopToolBarArea, self._toolbar)
 
+    def refresh_theme(self) -> None:
+        """Apply the Theme setting application-wide and tint icons and Compare colours to it."""
+        self._theme_name = theme.apply(QApplication.instance(), self._settings.theme, self._color_scheme())
+        self.set_icon_colour(theme.icon_colour(self._theme_name))
+        self._compare_view.set_theme(self._theme_name)
+
+    def current_theme(self) -> str:
+        """The palette in use: light or dark (System resolved)."""
+        return self._theme_name
+
+    def _on_scheme_changed(self, *_args) -> None:
+        if self._settings.theme == "system":
+            self.refresh_theme()
+
     def set_icon_colour(self, colour) -> None:
         """Tint every icon (actions and list rows) with `colour`; None for the palette text colour."""
         for key, name in icons.ACTION_ICONS.items():
             self._actions.action(key).setIcon(icons.icon(name, colour))
         self._local_pane.set_icon_colour(colour)
         self._next_pane.set_icon_colour(colour)
+        self._card_icon.setPixmap(icons.icon(CARD_ICON, colour).pixmap(48, 48))
+        self._compare_view.set_icon_colour(colour)
 
     def toolbar_action_keys(self) -> list[str | None]:
         """The shared action behind each toolbar button (None for a separator)."""
@@ -456,8 +488,8 @@ class MainWindow(QMainWindow):
         """The centred card shown in place of the ZX Spectrum Next list while nothing is connected."""
         card = QFrame()
         card.setFrameShape(QFrame.StyledPanel)
-        icon = QLabel()
-        icon.setPixmap(self.style().standardIcon(QStyle.SP_ComputerIcon).pixmap(48, 48))
+        card.setObjectName("card")
+        icon = self._card_icon = QLabel()
         icon.setAlignment(Qt.AlignCenter)
         title = QLabel(tr("Waiting for a ZX Spectrum Next"))
         title.setStyleSheet("font-weight: bold")
@@ -732,6 +764,9 @@ class MainWindow(QMainWindow):
 
     def compare_state_texts(self) -> dict[str, str]:
         return self._compare_view.state_texts()
+
+    def compare_state_colour(self, path: str):
+        return self._compare_view.state_colour(path)
 
     def compare_back(self) -> None:
         self._views.setCurrentIndex(0)
@@ -1029,7 +1064,10 @@ class MainWindow(QMainWindow):
 
     def apply_settings(self, new: Settings) -> None:
         """Take the choices that act at once; a new language shows at the next start."""
+        theme_changed = new.theme != self._settings.theme
         self._settings = new
+        if theme_changed:
+            self.refresh_theme()
         self._local_pane.set_show_hidden(new.show_hidden)
         self._next_pane.set_show_hidden(new.show_hidden)
         self._update_actions()

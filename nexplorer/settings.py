@@ -12,6 +12,7 @@ from pathlib import Path
 from nexplorer.i18n import available_languages
 
 SORT_KEYS = ("name", "size", "type")
+THEMES = ("light", "dark", "system")
 
 
 @dataclass
@@ -20,6 +21,7 @@ class Settings:
     next_folder: str = ""
     geometry: str = ""  # base64 of QMainWindow.saveGeometry()
     language: str = "en"
+    theme: str = "light"
     show_hidden: bool = False
     crc_after_upload: bool = False
     local_sort: tuple[str, bool] = ("name", False)
@@ -61,6 +63,8 @@ def _valid(name: str, value: object) -> bool:
             return False
     if name == "language":
         return isinstance(value, str) and value in available_languages()
+    if name == "theme":
+        return isinstance(value, str) and value in THEMES
     default = getattr(Settings, name)
     return isinstance(value, type(default))
 
