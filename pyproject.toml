@@ -18,10 +18,11 @@ dev = ["pytest"]
 nexplorer = "nexplorer.__main__:main"
 
 [tool.setuptools]
-packages = ["nexplorer"]
+packages = ["nexplorer", "nexplorer.ui"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 
 [tool.setuptools.package-data]
 nexplorer = ["locales/*.json"]
+"nexplorer.ui" = ["svg/*.svg"]
