@@ -25,7 +25,7 @@ jobs:
         run: python packaging/check_release_tag.py "$TAG"
 
       - name: Install system libraries
-        run: sudo apt-get update && sudo apt-get install -y libfuse2 libxcb-cursor0
+        run: sudo apt-get update && sudo apt-get install -y libfuse2 libxcb-cursor0 libegl1 libgl1
 
       - name: Build the AppImage
         run: packaging/build-linux.sh
