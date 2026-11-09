@@ -12,9 +12,9 @@ jobs:
   linux:
     runs-on: ubuntu-22.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
 
@@ -33,7 +33,7 @@ jobs:
       - name: Smoke test
         run: packaging/smoke-test.sh dist/nexplorer-v*-linux-x86_64.AppImage
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v5
         with:
           name: nexplorer-linux-x86_64
           path: dist/nexplorer-v*-linux-x86_64.AppImage
@@ -42,9 +42,9 @@ jobs:
   windows:
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
 
@@ -67,7 +67,7 @@ jobs:
         shell: bash
         run: packaging/smoke-test.sh unpacked/nexplorer-v*/nexplorer.exe
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v5
         with:
           name: nexplorer-windows-x64
           path: dist/nexplorer-v*-windows-x64.zip
@@ -80,7 +80,7 @@ jobs:
     permissions:
       contents: write  # attach the files to the release
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v6
         with:
           path: files
           merge-multiple: true
