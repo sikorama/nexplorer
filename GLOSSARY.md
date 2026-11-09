@@ -31,3 +31,7 @@ _Avoid_: diff, change
 **Move**:
 Relocating a file or folder within the Next, by rename on the same drive or by copy then delete across drives. The source is deleted only after the copy is confirmed.
 _Avoid_: cut, cut/paste
+
+**Active pane**:
+The pane (Local or Next) that last had the keyboard focus, marked by an accent border. Menu entries, shortcuts and context menus act on it.
+_Avoid_: current pane, focused pane

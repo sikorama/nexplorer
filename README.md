@@ -2,7 +2,7 @@
 
 A small desktop file manager for a ZX Spectrum Next. One window, two panes: **Local** (your PC) on the left, **Next** (the Next's SD card) on the right. It talks to the Next over Wi-Fi through the existing dot command `.sync5`, which is used unchanged.
 
-You can browse both sides, send and receive files by buttons or drag and drop (asking before overwriting a name that already exists at the destination), create folders, rename, delete, copy and move inside the Next, and compare one Local folder with one Next folder.
+You can browse both sides, send and receive files from the Transfer menu or by drag and drop (asking before overwriting a name that already exists at the destination), create folders, rename, delete, copy and move inside the Next, and compare one Local folder with one Next folder.
 
 ## Run from a source checkout
 
