@@ -54,5 +54,11 @@
   "Conflict": "Conflit",
   "Invalid": "Invalide",
   "Ignored": "Ignoré",
-  "Hidden": "Masqué"
+  "Hidden": "Masqué",
+  "Already exists": "Existe déjà",
+  "already exists. Overwrite it?": "existe déjà. Le remplacer ?",
+  "Overwrite": "Remplacer",
+  "Skip": "Ignorer",
+  "Apply to all": "Appliquer à tous",
+  "Not started, the destination cannot be checked": "Non démarré, la destination ne peut pas être vérifiée"
 }

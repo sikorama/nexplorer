@@ -34,3 +34,19 @@ def test_every_shipped_catalogue_is_valid_json_of_strings():
         if path.exists():
             data = json.loads(path.read_text(encoding="utf-8"))
             assert all(isinstance(k, str) and isinstance(v, str) for k, v in data.items())
+
+
+def test_the_overwrite_prompt_strings_are_translated_in_french():
+    i18n.set_language("fr")
+    try:
+        for text in (
+            "Already exists",
+            "already exists. Overwrite it?",
+            "Overwrite",
+            "Skip",
+            "Apply to all",
+            "Not started, the destination cannot be checked",
+        ):
+            assert i18n.tr(text) != text
+    finally:
+        i18n.set_language("en")

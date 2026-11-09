@@ -27,6 +27,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from nexplorer import overwrite
 from nexplorer import settings as settings_store
 from nexplorer.capabilities import MINIMUM_DOT, Capabilities, capabilities
 from nexplorer.i18n import available_languages, set_language, tr
@@ -83,6 +84,29 @@ def _confirm_delete_dialog(message: str) -> bool:
     return answer == QMessageBox.Yes
 
 
+def _confirm_overwrite_dialog(path: str, remaining: int) -> tuple[str, bool]:
+    """Overwrite, Skip or Cancel for one name that already exists; Cancel is the default."""
+    box = QMessageBox(QMessageBox.Warning, tr("Already exists"), f"{path}\n\n{tr('already exists. Overwrite it?')}")
+    overwrite_button = box.addButton(tr("Overwrite"), QMessageBox.AcceptRole)
+    skip_button = box.addButton(tr("Skip"), QMessageBox.RejectRole)
+    cancel_button = box.addButton(tr("Cancel"), QMessageBox.RejectRole)
+    box.setDefaultButton(cancel_button)
+    box.setEscapeButton(cancel_button)
+    everyone = QCheckBox(f"{tr('Apply to all')} ({remaining})")
+    if remaining > 1:
+        box.setCheckBox(everyone)
+    box.exec()
+    clicked = box.clickedButton()
+    answer = (
+        overwrite.OVERWRITE
+        if clicked is overwrite_button
+        else overwrite.SKIP
+        if clicked is skip_button
+        else overwrite.CANCEL
+    )
+    return answer, everyone.isChecked()
+
+
 def _settings_dialog(current: Settings) -> Settings | None:
     dialog = QDialog()
     dialog.setWindowTitle(tr("Settings"))
@@ -116,6 +140,7 @@ def _settings_dialog(current: Settings) -> Settings | None:
 class _Operation(QObject):
     progress = Signal(str, int)
     finished = Signal(object)  # transfer.Result, or the exception that ended it
+    checked = Signal(object)  # the collisions a batch would cause, or the exception that stopped the check
     disconnected = Signal()  # the Next was told to leave (or the wait ran out)
 
 
@@ -126,6 +151,7 @@ class MainWindow(QMainWindow):
         local_addresses: Callable[[], list[tuple[str, str]]] = local_ipv4_addresses,
         ask_name: Callable[[str, str], str | None] = _ask_name_dialog,
         confirm_delete: Callable[[str], bool] = _confirm_delete_dialog,
+        confirm_overwrite: Callable[[str, int], tuple[str, bool]] = _confirm_overwrite_dialog,
         settings_path: Path | None = None,
         ask_settings: Callable[[Settings], Settings | None] = _settings_dialog,
     ):
@@ -135,6 +161,8 @@ class MainWindow(QMainWindow):
         self._settings = settings_store.load(settings_path) if settings_path else Settings()
         self._ask_settings = ask_settings
         self._ask_name, self._confirm_delete = ask_name, confirm_delete
+        self._confirm_overwrite = confirm_overwrite
+        self._after_check: Callable | None = None
         self.setWindowTitle("nexplorer")
         self._local_addresses = local_addresses
 
@@ -240,6 +268,7 @@ class MainWindow(QMainWindow):
         self._clipboard: tuple[str, str, list] | None = None  # ("copy" or "cut", Next folder, entries)
         self._clear_clipboard_if_clean = False
         self._operation.disconnected.connect(self._on_disconnected)
+        self._operation.checked.connect(self._on_checked)
         self._next_pane.selection_changed.connect(self._update_actions)
 
         column = QVBoxLayout(root)
@@ -337,16 +366,14 @@ class MainWindow(QMainWindow):
         session = self._next_pane.session()
         paths = [os.path.join(self._local_pane.path(), e.name) for e in self._local_pane.selected_entries()]
         folder = self._next_pane.path()
-        verify = self._settings.crc_after_upload and self._capabilities.crc
         if session and paths and folder:
-            self._run(lambda progress, cancel: send(session, paths, folder, progress, cancel, verify_crc=verify))
+            self._send_checked(session, paths, folder)
 
     def drop_files(self, paths: list[str], subfolder: str = "") -> None:
         """Files dropped on the Next pane: send them into the folder shown, or the subfolder hit."""
         session, folder = self._next_pane.session(), self._next_pane.folder_path(subfolder)
-        verify = self._settings.crc_after_upload and self._capabilities.crc
         if session and paths and folder:
-            self._run(lambda progress, cancel: send(session, paths, folder, progress, cancel, verify_crc=verify))
+            self._send_checked(session, paths, folder)
 
     def drop_next_entries(self, names: list[str]) -> None:
         """Next entries dragged onto the Local pane: receive them into the Local folder shown."""
@@ -355,7 +382,7 @@ class MainWindow(QMainWindow):
         entries = [e for e in self._next_pane.entries() if e.name in wanted]
         source, target = self._next_pane.path(), self._local_pane.path()
         if session and entries and source and target:
-            self._run(lambda progress, cancel: receive(session, source, entries, target, progress, cancel))
+            self._receive_checked(session, source, entries, target)
 
     def receive_selected(self) -> None:
         """Receive the selected Next entries into the Local folder shown."""
@@ -363,7 +390,67 @@ class MainWindow(QMainWindow):
         entries = self._next_pane.selected_entries()
         source, target = self._next_pane.path(), self._local_pane.path()
         if session and entries and source and target:
-            self._run(lambda progress, cancel: receive(session, source, entries, target, progress, cancel))
+            self._receive_checked(session, source, entries, target)
+
+    # -- overwrite check
+    def _send_checked(self, session, paths: list[str], folder: str) -> None:
+        verify = self._settings.crc_after_upload and self._capabilities.crc
+        self._checked_run(
+            lambda: overwrite.send_collisions(session, paths, folder),
+            lambda skip: lambda progress, cancel: send(
+                session, paths, folder, progress, cancel, verify_crc=verify, skip=skip
+            ),
+        )
+
+    def _receive_checked(self, session, source: str, entries: list, target: str) -> None:
+        self._checked_run(
+            lambda: overwrite.receive_collisions(session, source, entries, target),
+            lambda skip: lambda progress, cancel: receive(
+                session, source, entries, target, progress, cancel, skip=skip
+            ),
+        )
+
+    def _checked_run(self, check: Callable, make_work: Callable) -> None:
+        """List the destination off the UI thread, ask about what exists, then run the batch.
+        A destination that cannot be listed refuses the batch."""
+        if self._busy:
+            return
+        self._busy = True
+        self._cancel.clear()  # the Cancel button also stops a check that is still listing
+        self._cancel_button.setEnabled(True)
+        self._cancel_button.setText(tr("Cancel"))
+        self._summary.setText("")
+        self._op_bar.setValue(0)
+        self._op_label.setText("")
+        self._op_row.show()
+        self._after_check = make_work
+        self._update_actions()
+        operation = self._operation
+
+        def thread() -> None:
+            try:
+                outcome = check()
+            except Exception as exc:  # noqa: BLE001 - shown to the user
+                outcome = exc
+            self._emit(operation.checked, outcome)
+
+        threading.Thread(target=thread, daemon=True).start()
+
+    def _on_checked(self, outcome) -> None:
+        make_work, self._after_check = self._after_check, None
+        self._busy = False
+        self._op_row.hide()
+        if self._cancel.is_set():
+            self._summary.setText(tr("Cancelled"))
+        elif isinstance(outcome, Exception) or make_work is None:
+            self._summary.setText(f"{tr('Not started, the destination cannot be checked')}: {outcome}")
+        else:
+            decision = overwrite.decide(outcome, self._confirm_overwrite)
+            if decision.cancelled:
+                self._summary.setText(tr("Cancelled"))
+            else:
+                self._run(make_work(decision.skip))
+        self._update_actions()
 
     # -- changes on the Next
     def new_folder(self) -> None:
