@@ -6,7 +6,7 @@ import shutil
 import threading
 from typing import Callable, Protocol
 
-from PySide6.QtCore import QMimeData, QObject, Qt, Signal
+from PySide6.QtCore import QEvent, QMimeData, QObject, Qt, Signal
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QComboBox,
@@ -79,25 +79,12 @@ class _Tree(QTreeWidget):
 
     urls_dropped = Signal(list, str)  # local paths, name of the folder row under the cursor ("" if none)
     next_entries_dropped = Signal(list, str)  # names dragged out of the Next pane, folder row hit ("" if none)
-    copy_requested = Signal()
-    cut_requested = Signal()
-    paste_requested = Signal()
 
     def __init__(self):
         super().__init__()
         self.accept_urls = False
         self.accept_next_entries = False
         self.folder_rows_only = False  # Next entries are only taken when dropped on a folder row
-
-    def keyPressEvent(self, event) -> None:
-        if event.modifiers() == Qt.ControlModifier:
-            signal = {Qt.Key_C: self.copy_requested, Qt.Key_X: self.cut_requested, Qt.Key_V: self.paste_requested}.get(
-                event.key()
-            )
-            if signal is not None:
-                signal.emit()
-                return
-        super().keyPressEvent(event)
 
     def _folder_row(self, event) -> str:
         item = self.itemAt(event.position().toPoint())
@@ -169,6 +156,9 @@ class FolderPane(QWidget):
     """One side: header, drive selector with free space, Up and address, list, status line.
     Both sides share this layout so their rows line up."""
 
+    focused = Signal()  # the pane or one of its controls got the keyboard focus
+    context_requested = Signal(str, object)  # row name ("" on empty space), global position
+
     def __init__(self, backend: Backend, path: str, title: str = ""):
         super().__init__()
         self._backend = backend
@@ -220,8 +210,45 @@ class FolderPane(QWidget):
         col.addWidget(self._stack, 1)
         col.addWidget(self._status)
         self._controls = (self._drives, self._up, self._address)
+        for widget in (self._tree, *self._controls):
+            widget.installEventFilter(self)
+        self._tree.setContextMenuPolicy(Qt.CustomContextMenu)
+        self._tree.customContextMenuRequested.connect(self._on_context_menu)
+        self._active = False
+        self.set_active(False)
         if path:
             self.load(path)
+
+    # -- active pane
+    def eventFilter(self, watched, event) -> bool:
+        if event.type() == QEvent.FocusIn:
+            self.focused.emit()
+        return False
+
+    def set_active(self, active: bool) -> None:
+        """Mark the pane as the one the actions apply to: an accent border on its header and list."""
+        self._active = active
+        colour = "palette(highlight)" if active else "transparent"
+        self._title.setStyleSheet(f"font-weight: bold; border-bottom: 2px solid {colour}")
+        self._tree.setStyleSheet(f"QTreeWidget {{ border: 2px solid {colour}; }}")
+
+    def is_active(self) -> bool:
+        return self._active
+
+    def select_all(self) -> None:
+        self._tree.selectAll()
+
+    def prepare_context(self, row: str) -> None:
+        """A right-click on `row` ("" for empty space): an unselected row is selected alone,
+        empty space clears the selection, a selected row keeps the whole selection."""
+        if not row:
+            self._tree.clearSelection()
+        elif row not in self.selected_names():
+            self.select([row])
+
+    def _on_context_menu(self, pos) -> None:
+        item = self._tree.itemAt(pos)
+        self.context_requested.emit(item.text(0) if item is not None else "", self._tree.viewport().mapToGlobal(pos))
 
     # -- drives
     def open_drive_selector(self) -> None:
@@ -358,6 +385,9 @@ class FolderPane(QWidget):
         return self._tree.mimeData(self._tree.selectedItems())
 
     # -- observation points for tests
+    def address_field(self) -> QLineEdit:
+        return self._address
+
     def list_view(self) -> QTreeWidget:
         return self._tree
 
@@ -480,9 +510,6 @@ class NextPane(FolderPane):
         self._tree.accept_next_entries = True
         self._tree.folder_rows_only = True
         self.entries_moved = self._tree.next_entries_dropped
-        self.copy_requested = self._tree.copy_requested
-        self.cut_requested = self._tree.cut_requested
-        self.paste_requested = self._tree.paste_requested
         self._tree.setDragEnabled(True)
         self._tree.setSupportedDragActions(Qt.CopyAction)  # a Move would remove the source rows
         self._tree.setDragDropMode(QAbstractItemView.DragDrop)

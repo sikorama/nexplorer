@@ -111,6 +111,7 @@ def connect_next(app, w, listener, **kwargs):
     nxt = FakeNext(listener.port, fs=FS, free_blocks={"C": 2048, "M": 10}, **kwargs)
     nxt.connect()
     assert pump(app, lambda: w.next_pane_state() == "connected")
+    w.activate_pane("next")  # the actions apply to the pane that has the focus
     return nxt
 
 
@@ -224,11 +225,10 @@ def test_closing_the_window_makes_the_next_leave(app, window):
     assert nxt.ended.wait(timeout=3)  # told to quit, not left polling a dead link
 
 
-def test_the_quit_button_closes_the_window_and_the_next_leaves(app, window):
+def test_quit_from_the_file_menu_closes_the_window_and_the_next_leaves(app, window):
     w, listener = window
     nxt = connect_next(app, w, listener)
-    assert w.quit_text() == "Quit"
-    w._quit_button.click()
+    w.trigger_menu("File", "Quit")
     assert not w.isVisible()
     assert nxt.ended.wait(timeout=3)
 
@@ -406,17 +406,17 @@ def test_copy_then_paste_duplicates_into_the_folder_shown_and_can_paste_again(ap
     nxt = connect_next(app, w, listener)
     pane = w.next_pane()
     assert pump(app, lambda: "readme.txt" in pane.names())
-    assert not w.paste_enabled() and not w.copy_enabled() and not w.cut_enabled()
+    assert not w.entry_enabled("Edit", "Paste") and not w.entry_enabled("Edit", "Copy") and not w.entry_enabled("Edit", "Cut")
     pane.select(["readme.txt"])
-    assert w.copy_enabled() and w.cut_enabled()
+    assert w.entry_enabled("Edit", "Copy") and w.entry_enabled("Edit", "Cut")
     w.copy_selected()
-    assert w.paste_enabled()
+    assert w.entry_enabled("Edit", "Paste")
     pane.enter("games")
     assert pump(app, lambda: pane.names() == ["manic.tap"])
     w.paste()
     assert pump(app, lambda: pane.names() == ["manic.tap", "readme.txt"], timeout=5)
     assert nxt.fs["c:/readme.txt"] == b"hello" and nxt.fs["c:/games/readme.txt"] == b"hello"
-    assert w.paste_enabled()  # a copy can be pasted again
+    assert w.entry_enabled("Edit", "Paste")  # a copy can be pasted again
     nxt.drop()
 
 
@@ -432,7 +432,7 @@ def test_cut_then_paste_moves_on_the_same_drive_and_empties_the_clipboard(app, w
     w.paste()
     assert pump(app, lambda: pane.names() == ["manic.tap", "readme.txt"], timeout=5)
     assert "c:/readme.txt" not in nxt.fs and b"C" not in nxt.commands
-    assert pump(app, lambda: not w.paste_enabled())
+    assert pump(app, lambda: not w.entry_enabled("Edit", "Paste"))
     nxt.drop()
 
 
@@ -572,18 +572,18 @@ def test_declining_the_delete_confirmation_deletes_nothing(app, window):
 
 def test_next_actions_follow_the_selection(app, window):
     w, listener = window
-    assert not w.delete_enabled() and not w.rename_enabled()  # no Session yet
+    assert not w.entry_enabled("File", "Delete") and not w.entry_enabled("File", "Rename")  # no Session yet
     nxt = connect_next(app, w, listener)
     pane = w.next_pane()
     assert pump(app, lambda: "games" in pane.names())
-    assert w.new_folder_enabled()
-    assert not w.delete_enabled() and not w.rename_enabled()  # nothing selected
+    assert w.entry_enabled("File", "New folder")
+    assert not w.entry_enabled("File", "Delete") and not w.entry_enabled("File", "Rename")  # nothing selected
     pane.select(["readme.txt"])
-    assert w.delete_enabled() and w.rename_enabled()
+    assert w.entry_enabled("File", "Delete") and w.entry_enabled("File", "Rename")
     pane.select(["readme.txt", "games"])
-    assert w.delete_enabled() and not w.rename_enabled()  # rename takes exactly one
+    assert w.entry_enabled("File", "Delete") and not w.entry_enabled("File", "Rename")  # rename takes exactly one
     pane.select([])
-    assert not w.delete_enabled()
+    assert not w.entry_enabled("File", "Delete")
     nxt.drop()
 
 
@@ -601,13 +601,13 @@ def test_the_delete_confirmation_names_the_zx_spectrum_next(app, window):
 
 def test_disconnect_ends_the_session_and_leaves_the_window_waiting_for_another_next(app, window):
     w, listener = window
-    assert not w.disconnect_enabled()
+    assert not w.entry_enabled("Transfer", "Disconnect")
     nxt = connect_next(app, w, listener)
-    assert pump(app, w.disconnect_enabled)
-    w._disconnect.click()
+    assert pump(app, lambda: w.entry_enabled("Transfer", "Disconnect"))
+    w.trigger_menu("Transfer", "Disconnect")
     assert nxt.ended.wait(timeout=5)  # told to quit, not left polling
     assert pump(app, lambda: w.next_pane_state() == "waiting", timeout=5)
-    assert w.isVisible() and not w.disconnect_enabled()
+    assert w.isVisible() and not w.entry_enabled("Transfer", "Disconnect")
     second = FakeNext(listener.port, fs=FS, free_blocks={"C": 2048})
     end = time.time() + 3
     while second.connect() != b"Listening" and time.time() < end:

@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Callable
 
 from PySide6.QtCore import QObject, Qt, Signal
+from PySide6.QtGui import QKeySequence
 from PySide6.QtNetwork import QAbstractSocket, QNetworkInterface
 from PySide6.QtWidgets import (
     QApplication,
@@ -21,6 +22,7 @@ from PySide6.QtWidgets import (
     QFrame,
     QLabel,
     QMainWindow,
+    QMenu,
     QMessageBox,
     QProgressBar,
     QPushButton,
@@ -49,6 +51,7 @@ from nexplorer.local_roots import Root, local_roots
 from nexplorer.protocol import Listener, RemoteError
 from nexplorer.transfer import Result, copy, is_plain_name, make_folder, move, receive, remove, rename, send
 from nexplorer.settings import Settings
+from nexplorer.ui.actions import LOCAL, NEXT, Binding, SharedActions
 from nexplorer.ui.bridge import ListenerBridge
 from nexplorer.ui.compare_view import CompareView
 from nexplorer.ui.panes import LocalPane, NextPane, format_size
@@ -112,6 +115,14 @@ def _confirm_overwrite_dialog(path: str, remaining: int) -> tuple[str, bool]:
     return answer, everyone.isChecked()
 
 
+def _about_dialog() -> None:
+    QMessageBox.about(
+        None,
+        tr("About"),
+        "nexplorer\n\n" + tr("A file manager for the SD card of a ZX Spectrum Next, driven over Wi-Fi."),
+    )
+
+
 def _settings_dialog(current: Settings) -> Settings | None:
     dialog = QDialog()
     dialog.setWindowTitle(tr("Settings"))
@@ -160,8 +171,11 @@ class MainWindow(QMainWindow):
         settings_path: Path | None = None,
         ask_settings: Callable[[Settings], Settings | None] = _settings_dialog,
         local_roots: Callable[[], list[Root]] = local_roots,
+        show_about: Callable[[], None] = _about_dialog,
     ):
         super().__init__()
+        self._show_about = show_about
+        self._active = LOCAL  # the pane that last had focus: the actions apply to it
         # Without a path nothing is read or written (tests, throwaway windows).
         self._settings_path = settings_path
         self._settings = settings_store.load(settings_path) if settings_path else Settings()
@@ -199,45 +213,9 @@ class MainWindow(QMainWindow):
         self._views.addWidget(panes_page)
         self._views.addWidget(self._compare_view)
 
-        self._send = QPushButton(tr("Send \u2192"))
-        self._send.clicked.connect(self.send_selected)
-        self._receive = QPushButton(tr("\u2190 Receive"))
-        self._receive.clicked.connect(self.receive_selected)
-        self._new_folder = QPushButton(tr("New folder"))
-        self._new_folder.clicked.connect(self.new_folder)
-        self._rename = QPushButton(tr("Rename"))
-        self._rename.clicked.connect(self.rename_selected)
-        self._copy = QPushButton(tr("Copy"))
-        self._copy.clicked.connect(self.copy_selected)
-        self._cut = QPushButton(tr("Cut"))
-        self._cut.clicked.connect(self.cut_selected)
-        self._paste = QPushButton(tr("Paste"))
-        self._paste.clicked.connect(self.paste)
-        self._compare = QPushButton(tr("Compare"))
-        self._compare.clicked.connect(self.compare)
-        self._delete = QPushButton(tr("Delete"))
-        self._delete.clicked.connect(self.delete_selected)
-        actions = QHBoxLayout()
-        actions.addWidget(self._send)
-        actions.addWidget(self._receive)
-        actions.addWidget(self._new_folder)
-        actions.addWidget(self._rename)
-        actions.addWidget(self._copy)
-        actions.addWidget(self._cut)
-        actions.addWidget(self._paste)
-        actions.addWidget(self._delete)
-        actions.addWidget(self._compare)
-        actions.addStretch(1)
-        self._settings_button = QPushButton(tr("Settings"))
-        self._settings_button.clicked.connect(self.open_settings)
-        actions.addWidget(self._settings_button)
-        self._disconnect = QPushButton(tr("Disconnect"))
-        self._disconnect.clicked.connect(self.disconnect)
-        actions.addWidget(self._disconnect)
-        self._quit_button = QPushButton(tr("Quit"))
-        self._quit_button.setShortcut("Ctrl+Q")
-        self._quit_button.clicked.connect(self.close)
-        actions.addWidget(self._quit_button)
+        self._actions = SharedActions(self, lambda: self._active)
+        self._define_actions()
+        self._build_menus()
 
         self._op_label = QLabel()
         self._op_bar = QProgressBar()
@@ -274,11 +252,16 @@ class MainWindow(QMainWindow):
         self._operation.disconnected.connect(self._on_disconnected)
         self._operation.checked.connect(self._on_checked)
         self._next_pane.selection_changed.connect(self._update_actions)
+        self._local_pane.selection_changed.connect(self._update_actions)
+        for side in (LOCAL, NEXT):
+            pane = self._pane(side)
+            pane.focused.connect(lambda side=side: self.activate_pane(side))
+            pane.context_requested.connect(lambda row, pos, side=side: self._popup_context(side, row, pos))
+        self._local_pane.set_active(True)
         self._local_pane.selection_changed.connect(lambda: self._show_selection(self._local_pane))
         self._next_pane.selection_changed.connect(lambda: self._show_selection(self._next_pane))
 
         column = QVBoxLayout(root)
-        column.addLayout(actions)
         column.addWidget(self._views, 1)
         self.setCentralWidget(root)
         bar = self.statusBar()
@@ -306,14 +289,131 @@ class MainWindow(QMainWindow):
         self._next_pane.files_dropped.connect(self.drop_files)
         self._local_pane.next_entries_dropped.connect(lambda names, _row: self.drop_next_entries(names))
         self._next_pane.entries_moved.connect(self.move_dropped)
-        self._next_pane.copy_requested.connect(self.copy_selected)
-        self._next_pane.cut_requested.connect(self.cut_selected)
-        self._next_pane.paste_requested.connect(self.paste)
         self._bridge.session_ready.connect(self._next_pane.bind)
         self._bridge.session_ready.connect(lambda _s: self._update_actions())
         self._bridge.dot_version.connect(self._on_dot_version)
         self._bridge.dot_unanswered.connect(self._on_dot_unanswered)
         self._bridge.session_ended.connect(self._show_waiting)
+
+    # -- actions, menus
+    def _define_actions(self) -> None:
+        """Every action once; a later ticket gives an action its Local side with `bind`."""
+        a = self._actions
+
+        def idle() -> bool:
+            return self._next_pane.session() is not None and not self._busy
+
+        def selected() -> int:
+            return len(self._next_pane.selected_names())
+
+        def can_copy() -> bool:
+            return idle() and self._capabilities.copy
+
+        def always() -> bool:
+            return True
+
+        def connected() -> bool:
+            return self._next_pane.session() is not None
+
+        def at_rest() -> bool:
+            return not self._busy
+
+        def sort(key: str) -> Callable[[], None]:
+            return lambda: self._pane(self._active).sort_by(key)
+
+        a.define("new_folder", tr("New folder"), "Ctrl+Shift+N", next=Binding(idle, self.new_folder))
+        a.define(
+            "rename",
+            tr("Rename"),
+            "F2",
+            next=Binding(lambda: idle() and self._capabilities.rename and selected() == 1, self.rename_selected),
+        )
+        a.define("delete", tr("Delete"), "Del", next=Binding(lambda: idle() and selected() >= 1, self.delete_selected))
+        a.define("settings", tr("Settings"), both=Binding(always, self.open_settings))
+        a.define("quit", tr("Quit"), "Ctrl+Q", both=Binding(always, self.close))
+        a.define("copy", tr("Copy"), "Ctrl+C", next=Binding(lambda: can_copy() and selected() >= 1, self.copy_selected))
+        a.define("cut", tr("Cut"), "Ctrl+X", next=Binding(lambda: can_copy() and selected() >= 1, self.cut_selected))
+        a.define(
+            "paste", tr("Paste"), "Ctrl+V", next=Binding(lambda: can_copy() and self._clipboard is not None, self.paste)
+        )
+        a.define(
+            "select_all",
+            tr("Select all"),
+            "Ctrl+A",
+            local=Binding(always, self._local_pane.select_all),
+            next=Binding(lambda: connected() and at_rest(), self._next_pane.select_all),
+        )
+        a.define("send", tr("Send"), both=Binding(idle, self.send_selected))
+        a.define("receive", tr("Receive"), both=Binding(idle, self.receive_selected))
+        a.define("compare", tr("Compare"), both=Binding(idle, self.compare))
+        a.define(
+            "disconnect",
+            tr("Disconnect"),
+            both=Binding(lambda: connected() and not self._disconnecting, self.disconnect),
+        )
+        a.define("show_hidden", tr("Show hidden files"), both=Binding(always, self._toggle_hidden), checkable=True)
+        for key, label in (("name", tr("Name")), ("size", tr("Size")), ("type", tr("Type"))):
+            a.define(f"sort_{key}", label, local=Binding(always, sort(key)), next=Binding(at_rest, sort(key)))
+        a.define(
+            "refresh",
+            tr("Refresh"),
+            "F5",
+            local=Binding(always, lambda: self._local_pane.reload()),
+            next=Binding(lambda: connected() and at_rest(), lambda: self._next_pane.reload()),
+        )
+        a.define("about", tr("About"), both=Binding(always, self._show_about))
+
+    def _build_menus(self) -> None:
+        a = self._actions.action
+        bar = self.menuBar()
+        for title, keys in (
+            (tr("File"), ["new_folder", "rename", "delete", "settings", "quit"]),
+            (tr("Edit"), ["copy", "cut", "paste", "select_all"]),
+            (tr("Transfer"), ["send", "receive", "compare", "disconnect"]),
+            (tr("View"), ["show_hidden", "sort", "refresh"]),
+            (tr("Help"), ["about"]),
+        ):
+            menu = bar.addMenu(title)
+            for key in keys:
+                if key == "sort":
+                    sub = menu.addMenu(tr("Sort by"))
+                    for sort_key in ("sort_name", "sort_size", "sort_type"):
+                        sub.addAction(a(sort_key))
+                else:
+                    menu.addAction(a(key))
+
+    def _pane(self, side: str):
+        return self._local_pane if side == LOCAL else self._next_pane
+
+    def activate_pane(self, side: str) -> None:
+        """The pane the actions apply to: the one that last had focus."""
+        self._active = side
+        self._local_pane.set_active(side == LOCAL)
+        self._next_pane.set_active(side == NEXT)
+        self._update_actions()
+
+    def active_pane(self) -> str:
+        return self._active
+
+    def _toggle_hidden(self) -> None:
+        self.apply_settings(replace(self._settings, show_hidden=not self._settings.show_hidden))
+        self._write_settings()
+
+    ROW_ACTIONS = ("copy", "cut", "paste", "rename", "delete")
+    EMPTY_ACTIONS = ("new_folder", "paste", "select_all", "refresh")
+
+    def context_menu(self, side: str, row: str | None) -> QMenu:
+        """The right-click menu of `side` on `row` (None for empty space). The pane becomes
+        active, and an unselected row is selected first."""
+        self._pane(side).prepare_context(row or "")
+        self.activate_pane(side)
+        menu = QMenu(self)
+        for key in self.ROW_ACTIONS if row else self.EMPTY_ACTIONS:
+            menu.addAction(self._actions.action(key))
+        return menu
+
+    def _popup_context(self, side: str, row: str, pos) -> None:
+        self.context_menu(side, row or None).exec(pos)
 
     def _build_waiting_card(self) -> QWidget:
         """The centred card shown in place of the ZX Spectrum Next list while nothing is connected."""
@@ -779,21 +879,10 @@ class MainWindow(QMainWindow):
         self._update_actions()
 
     def _update_actions(self) -> None:
-        """Modifying actions follow the Session and are greyed while one operation runs."""
-        connected = self._next_pane.session() is not None
-        enabled = connected and not self._busy
-        selected = len(self._next_pane.selected_names())
-        self._send.setEnabled(enabled)
-        self._receive.setEnabled(enabled)
-        self._new_folder.setEnabled(enabled)
-        self._rename.setEnabled(enabled and self._capabilities.rename and selected == 1)
-        self._delete.setEnabled(enabled and selected >= 1)
-        can_copy = self._capabilities.copy
-        self._copy.setEnabled(enabled and can_copy and selected >= 1)
-        self._cut.setEnabled(enabled and can_copy and selected >= 1)
-        self._paste.setEnabled(enabled and can_copy and self._clipboard is not None)
-        self._disconnect.setEnabled(connected and not self._disconnecting)
-        self._compare.setEnabled(enabled)
+        """Actions follow the active pane, the Session, the capabilities and the selection,
+        and are greyed while one operation runs."""
+        self._actions.refresh()
+        self._actions.action("show_hidden").setChecked(self._settings.show_hidden)
         self._compare_view.set_busy(self._busy)
         self._compare_view.set_verify_available(self._capabilities.crc)
         self._next_pane.setEnabled(not self._busy)  # the serial link is busy: no queued listings
@@ -811,38 +900,44 @@ class MainWindow(QMainWindow):
     def compare_verify_enabled(self) -> bool:
         return self._compare_view.verify_enabled()
 
-    def delete_enabled(self) -> bool:
-        return self._delete.isEnabled()
+    def menu_titles(self) -> list[str]:
+        return [action.text() for action in self.menuBar().actions()]
 
-    def rename_enabled(self) -> bool:
-        return self._rename.isEnabled()
+    def _menu(self, title: str) -> QMenu:
+        return next(a.menu() for a in self.menuBar().actions() if a.text() == title)
 
-    def new_folder_enabled(self) -> bool:
-        return self._new_folder.isEnabled()
+    @staticmethod
+    def _entries(menu: QMenu) -> list[tuple[str, str, bool]]:
+        return [
+            (a.text(), a.shortcut().toString(QKeySequence.PortableText), a.isEnabled())
+            for a in menu.actions()
+            if not a.isSeparator()
+        ]
 
-    def disconnect_enabled(self) -> bool:
-        return self._disconnect.isEnabled()
+    def menu_entries(self, title: str) -> list[tuple[str, str, bool]]:
+        """(label, shortcut, enabled) of each entry of a menu."""
+        return self._entries(self._menu(title))
 
-    def copy_enabled(self) -> bool:
-        return self._copy.isEnabled()
+    def _find(self, menu: QMenu, path: str):
+        first, _, rest = path.partition("/")
+        found = next(a for a in menu.actions() if a.text() == first)
+        return self._find(found.menu(), rest) if rest else found
 
-    def cut_enabled(self) -> bool:
-        return self._cut.isEnabled()
+    def trigger_menu(self, title: str, entry: str) -> None:
+        """Click an entry (`Sort by/Name` for one in a submenu); a greyed entry does nothing."""
+        self._find(self._menu(title), entry).trigger()
 
-    def paste_enabled(self) -> bool:
-        return self._paste.isEnabled()
+    def entry_enabled(self, title: str, entry: str) -> bool:
+        return self._find(self._menu(title), entry).isEnabled()
 
-    def delete_text(self) -> str:
-        return self._delete.text()
+    def entry_checked(self, title: str, entry: str) -> bool:
+        return self._find(self._menu(title), entry).isChecked()
 
-    def rename_text(self) -> str:
-        return self._rename.text()
+    def context_entries(self, side: str, row: str | None) -> list[tuple[str, str, bool]]:
+        return self._entries(self.context_menu(side, row))
 
-    def new_folder_text(self) -> str:
-        return self._new_folder.text()
-
-    def actions_enabled(self) -> bool:
-        return self._send.isEnabled() and self._receive.isEnabled()
+    def trigger_context(self, side: str, row: str | None, entry: str) -> None:
+        self._find(self.context_menu(side, row), entry).trigger()
 
     def summary_text(self) -> str:
         return self._summary.text()
@@ -889,9 +984,6 @@ class MainWindow(QMainWindow):
     def cancel_enabled(self) -> bool:
         return self._cancel_button.isEnabled()
 
-    def quit_text(self) -> str:
-        return self._quit_button.text()
-
     def open_settings(self) -> None:
         changed = self._ask_settings(self._settings)
         if changed is not None:
@@ -903,6 +995,7 @@ class MainWindow(QMainWindow):
         self._settings = new
         self._local_pane.set_show_hidden(new.show_hidden)
         self._next_pane.set_show_hidden(new.show_hidden)
+        self._update_actions()
 
     def _write_settings(self) -> None:
         if self._settings_path is None:
