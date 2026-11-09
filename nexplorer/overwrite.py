@@ -55,14 +55,12 @@ def receive_collisions(
 
 
 def _receive_level(session, folder, entries, local, found, timeout) -> None:
-    existing = {os.path.normcase(n): n for n in os.listdir(local)}
     for entry in entries:
         if not is_plain_name(entry.name):
             continue  # refused by the transfer itself
-        name = existing.get(os.path.normcase(entry.name))
-        if name is None:
+        target = os.path.join(local, entry.name)  # the path the transfer writes, and `skip` compares
+        if not os.path.lexists(target):  # the Local file system decides what counts as the same name
             continue
-        target = os.path.join(local, name)
         if entry.is_dir and os.path.isdir(target):
             source = folder.rstrip("/") + "/" + entry.name
             _receive_level(session, source, session.list_dir(source, timeout=timeout), target, found, timeout)

@@ -245,3 +245,28 @@ def test_verify_settles_nested_rows_and_state_texts_include_them(app, tmp_path):
         texts = w.compare_state_texts()
         assert {"games", "games/a.tap", "games/deep", "up.tap"} <= set(texts)
         nxt.drop()
+
+
+PANE_ENTRIES = [
+    ("File", "New folder"), ("File", "Rename"), ("File", "Delete"),
+    ("Edit", "Copy"), ("Edit", "Cut"), ("Edit", "Select all"),
+    ("Transfer", "Send"), ("Transfer", "Receive"), ("View", "Refresh"),
+]  # fmt: skip
+
+
+def test_pane_actions_are_greyed_while_compare_is_shown(app, tmp_path):
+    path = local_folder(tmp_path)
+    with opened(app, path) as (w, listener):
+        nxt = prepare(app, w, listener, tmp_path, NEXT_FS)
+        w.local_pane().select(["up.tap"])
+        w.trigger_menu("Edit", "Copy")
+        w.activate_pane("local")
+        assert w.entry_enabled("File", "Delete")
+        assert w.entry_enabled("Transfer", "Send") and w.entry_enabled("View", "Refresh")
+        w.compare()
+        for title, entry in [*PANE_ENTRIES, ("Edit", "Paste")]:
+            assert not w.entry_enabled(title, entry), (title, entry)
+        w.compare_back()
+        assert w.entry_enabled("File", "Delete") and w.entry_enabled("Transfer", "Send")
+        assert w.entry_enabled("View", "Refresh") and w.entry_enabled("Edit", "Select all")
+        nxt.drop()

@@ -2,7 +2,15 @@
 
 A small desktop file manager for a ZX Spectrum Next. One window, two panes: **Local** (your PC) on the left, **Next** (the Next's SD card) on the right. It talks to the Next over Wi-Fi through the existing dot command `.sync5`, which is used unchanged.
 
-You can browse both sides, send and receive files from the Transfer menu or by drag and drop (asking before overwriting a name that already exists at the destination), create folders, rename, delete, copy and move inside the Next, and compare one Local folder with one Next folder.
+Features:
+
+- Browse both sides. The pane that last had the focus (accent border) is the one the menus, shortcuts and context menus act on.
+- Create folders, rename and delete on both sides. On Local, delete goes to the trash, and permanent deletion is offered when the trash cannot take an entry. The Next has no trash: its deletions are confirmed and permanent.
+- Cut, copy and paste (Ctrl+X, Ctrl+C, Ctrl+V) inside a pane. Copied entries can also be pasted into the other pane, which sends or receives them. Cut is a mark that becomes a move on paste, within its own pane. Drag and drop moves entries inside a pane (Shift: copies) and transfers them between panes.
+- Transfer the selection to the other side with a double-click, **F5**, the buttons between the panes or the Transfer menu. When a name already exists at the destination, nexplorer asks: overwrite, skip or cancel, optionally for all.
+- Other shortcuts: Ctrl+A select all, Ctrl+R refresh, Ctrl+Shift+N new folder, Del delete, Ctrl+Q quit.
+- Compare one Local folder with one Next folder.
+- Themes **Light**, **Dark** and **System** (follows the desktop), and the interface language, in Settings.
 
 ## Run from a source checkout
 

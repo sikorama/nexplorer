@@ -53,9 +53,14 @@ def _each(names: list[str], progress: Progress | None, cancel: Callable[[], bool
     return result
 
 
+def _invalid(name: str, new: str) -> Result | None:
+    """A refusal when `new` is not a plain name (no separator, no `..`), else None."""
+    return None if is_plain_name(new) else Result([Failure(name, tr("Invalid name"))])
+
+
 def make_folder(folder: str, name: str) -> Result:
-    if not is_plain_name(name):
-        return Result([Failure(name, tr("Invalid name"))])
+    if (refused := _invalid(name, name)) is not None:
+        return refused
     try:
         os.mkdir(os.path.join(folder, name))
     except OSError as exc:
@@ -64,8 +69,8 @@ def make_folder(folder: str, name: str) -> Result:
 
 
 def rename(folder: str, old: str, new: str) -> Result:
-    if not is_plain_name(new):
-        return Result([Failure(old, tr("Invalid name"))])
+    if (refused := _invalid(old, new)) is not None:
+        return refused
     source, target = os.path.join(folder, old), os.path.join(folder, new)
     try:
         if os.path.lexists(target) and not (os.path.exists(source) and os.path.samefile(source, target)):
@@ -76,26 +81,26 @@ def rename(folder: str, old: str, new: str) -> Result:
     return Result()
 
 
+def _each_in(folder: str, names: list[str], act: Callable[[str], None], progress, cancel) -> Result:
+    """Apply `act` to the path of each entry; a raised error is that entry's failure."""
+
+    def one(name: str) -> list[Failure]:
+        act(os.path.join(folder, name))
+        return []
+
+    return _each(names, progress, cancel, one)
+
+
 def trash_entries(
     folder: str, names: list[str], trash: Trash, progress: Progress | None = None, cancel=None
 ) -> Result:
     """Send the entries to the trash; the failures are the ones the trash could not take."""
-
-    def one(name: str) -> list[Failure]:
-        trash(os.path.join(folder, name))
-        return []
-
-    return _each(names, progress, cancel, one)
+    return _each_in(folder, names, trash, progress, cancel)
 
 
 def delete_entries(folder: str, names: list[str], progress: Progress | None = None, cancel=None) -> Result:
     """Delete for good, folders with their content."""
-
-    def one(name: str) -> list[Failure]:
-        delete_path(os.path.join(folder, name))
-        return []
-
-    return _each(names, progress, cancel, one)
+    return _each_in(folder, names, delete_path, progress, cancel)
 
 
 def _merge(source: str, target: str, move: bool, label: str) -> list[Failure]:
