@@ -72,6 +72,7 @@ class LocalBackend:
 
 
 NEXT_ENTRIES_MIME = "application/x-nexplorer-next-entries"
+LOCAL_ENTRIES_MIME = "application/x-nexplorer-local-entries"
 
 
 class _Tree(QTreeWidget):
@@ -79,12 +80,15 @@ class _Tree(QTreeWidget):
 
     urls_dropped = Signal(list, str)  # local paths, name of the folder row under the cursor ("" if none)
     next_entries_dropped = Signal(list, str)  # names dragged out of the Next pane, folder row hit ("" if none)
+    local_entries_dropped = Signal(list, str, bool)  # names dragged inside the Local pane, folder row hit, copy?
 
     def __init__(self):
         super().__init__()
         self.accept_urls = False
         self.accept_next_entries = False
         self.folder_rows_only = False  # Next entries are only taken when dropped on a folder row
+        self.accept_local_entries = False  # Local entries are only taken when dropped on a folder row
+        self.drag_format = NEXT_ENTRIES_MIME  # what a drag of this pane's rows carries
 
     def _folder_row(self, event) -> str:
         item = self.itemAt(event.position().toPoint())
@@ -92,13 +96,15 @@ class _Tree(QTreeWidget):
 
     def mimeData(self, items) -> QMimeData:
         mime = QMimeData()
-        mime.setData(NEXT_ENTRIES_MIME, "\n".join(i.text(0) for i in items).encode())
+        mime.setData(self.drag_format, "\n".join(i.text(0) for i in items).encode())
         return mime
 
     def _carries_wanted(self, event) -> bool:
         mime = event.mimeData()
-        return (self.accept_urls and mime.hasUrls()) or (
-            self.accept_next_entries and mime.hasFormat(NEXT_ENTRIES_MIME)
+        return (
+            (self.accept_urls and mime.hasUrls())
+            or (self.accept_next_entries and mime.hasFormat(NEXT_ENTRIES_MIME))
+            or (self.accept_local_entries and mime.hasFormat(LOCAL_ENTRIES_MIME))
         )
 
     def _wanted(self, event) -> bool:
@@ -107,6 +113,8 @@ class _Tree(QTreeWidget):
             return True
         if self.accept_next_entries and mime.hasFormat(NEXT_ENTRIES_MIME):
             return not self.folder_rows_only or bool(self._folder_row(event))
+        if self.accept_local_entries and mime.hasFormat(LOCAL_ENTRIES_MIME):
+            return bool(self._folder_row(event))
         return False
 
     def dragEnterEvent(self, event) -> None:
@@ -126,6 +134,12 @@ class _Tree(QTreeWidget):
     def dropEvent(self, event) -> None:
         if not self._wanted(event):
             event.ignore()
+            return
+        if event.mimeData().hasFormat(LOCAL_ENTRIES_MIME):
+            names = bytes(event.mimeData().data(LOCAL_ENTRIES_MIME)).decode().split("\n")
+            copy = bool(event.modifiers() & Qt.ShiftModifier)
+            event.acceptProposedAction()
+            self.local_entries_dropped.emit([n for n in names if n], self._folder_row(event), copy)
             return
         if event.mimeData().hasFormat(NEXT_ENTRIES_MIME):
             names = bytes(event.mimeData().data(NEXT_ENTRIES_MIME)).decode().split("\n")
@@ -426,6 +440,12 @@ class LocalPane(FolderPane):
         self._tree.accept_next_entries = True
         self._tree.setAcceptDrops(True)
         self.next_entries_dropped = self._tree.next_entries_dropped
+        self._tree.accept_local_entries = True  # dragging inside this pane moves (Shift: copies)
+        self._tree.drag_format = LOCAL_ENTRIES_MIME
+        self._tree.setDragEnabled(True)
+        self._tree.setSupportedDragActions(Qt.CopyAction)  # a Move would remove the source rows
+        self._tree.setDragDropMode(QAbstractItemView.DragDrop)
+        self.local_entries_dropped = self._tree.local_entries_dropped
         self.open_drive_selector()
 
     def open_drive_selector(self) -> None:
