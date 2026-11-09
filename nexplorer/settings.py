@@ -24,6 +24,7 @@ class Settings:
     crc_after_upload: bool = False
     local_sort: tuple[str, bool] = ("name", False)
     next_sort: tuple[str, bool] = ("name", False)
+    splitter: tuple[int, ...] = ()  # widths of the Local and ZX Spectrum Next panes; empty = even split
 
 
 def config_path(
@@ -48,6 +49,11 @@ def _valid(name: str, value: object) -> bool:
             and value[0] in SORT_KEYS
             and isinstance(value[1], bool)
         )
+    if name == "splitter":
+        return (
+            isinstance(value, (list, tuple))
+            and (len(value) == 0 or (len(value) == 2 and all(type(v) is int and v > 0 for v in value)))
+        )
     if name == "geometry" and isinstance(value, str):
         try:
             base64.b64decode(value, validate=True)
@@ -69,7 +75,7 @@ def load(path: Path | None = None) -> Settings:
     kept = {}
     for f in fields(Settings):
         if f.name in data and _valid(f.name, data[f.name]):
-            kept[f.name] = tuple(data[f.name]) if f.name.endswith("_sort") else data[f.name]
+            kept[f.name] = tuple(data[f.name]) if f.name.endswith("_sort") or f.name == "splitter" else data[f.name]
     return Settings(**kept)
 
 

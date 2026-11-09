@@ -50,3 +50,13 @@ def test_a_malformed_geometry_or_an_unknown_language_falls_back_to_the_defaults(
     assert s.show_hidden is True  # the other keys survive
     path.write_text(json.dumps({"geometry": "AAEC", "language": "fr"}))
     assert (load(path).geometry, load(path).language) == ("AAEC", "fr")
+
+
+def test_splitter_widths_round_trip_and_bad_values_fall_back(tmp_path):
+    path = tmp_path / "settings.json"
+    save(Settings(splitter=(300, 700)), path)
+    assert load(path).splitter == (300, 700)
+    assert Settings().splitter == ()
+    for bad in ([1], [1, 2, 3], [0, 5], ["a", 1], "x", [True, 5]):
+        path.write_text(json.dumps({"splitter": bad, "language": "fr"}))
+        assert load(path).splitter == () and load(path).language == "fr"

@@ -24,7 +24,7 @@ _ARROWS = {"to-next": "→", "to-local": "←", None: ""}
 def _states() -> dict[str, str]:
     return {
         "only-local": tr("Only on Local"),
-        "only-next": tr("Only on the Next"),
+        "only-next": tr("Only on the ZX Spectrum Next"),
         "different": tr("Different"),
         "unverified": tr("Unverified"),
         "identical": tr("Identical"),
@@ -57,7 +57,7 @@ class CompareView(QWidget):
         self._title.setTextFormat(Qt.PlainText)
         self._tree = QTreeWidget()
         self._tree.itemExpanded.connect(self._on_item_expanded)
-        self._tree.setHeaderLabels(["", tr("Name"), tr("Local"), tr("Direction"), tr("Next"), tr("State")])
+        self._tree.setHeaderLabels(["", tr("Name"), tr("Local"), tr("Direction"), tr("ZX Spectrum Next"), tr("State")])
         self._tree.itemChanged.connect(self._on_item_changed)
         self._reverse = QPushButton(tr("Reverse direction"))
         self._reverse.clicked.connect(self._reverse_selected)

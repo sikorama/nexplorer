@@ -10,6 +10,7 @@ from typing import Callable
 from PySide6.QtCore import QObject, Qt, Signal
 from PySide6.QtNetwork import QAbstractSocket, QNetworkInterface
 from PySide6.QtWidgets import (
+    QApplication,
     QCheckBox,
     QComboBox,
     QDialog,
@@ -17,12 +18,15 @@ from PySide6.QtWidgets import (
     QFormLayout,
     QHBoxLayout,
     QInputDialog,
+    QFrame,
     QLabel,
     QMainWindow,
     QMessageBox,
     QProgressBar,
     QPushButton,
+    QSplitter,
     QStackedWidget,
+    QStyle,
     QVBoxLayout,
     QWidget,
 )
@@ -41,12 +45,13 @@ from nexplorer.compare import (
     recompare,
     verify as verify_rows,
 )
+from nexplorer.local_roots import Root, local_roots
 from nexplorer.protocol import Listener, RemoteError
 from nexplorer.transfer import Result, copy, is_plain_name, make_folder, move, receive, remove, rename, send
 from nexplorer.settings import Settings
 from nexplorer.ui.bridge import ListenerBridge
 from nexplorer.ui.compare_view import CompareView
-from nexplorer.ui.panes import LocalPane, NextPane
+from nexplorer.ui.panes import LocalPane, NextPane, format_size
 
 SYNC_COMMAND = ".sync5 -l"
 CONFIG_FILE = "c:/sys/config/nextsync.cfg"
@@ -154,6 +159,7 @@ class MainWindow(QMainWindow):
         confirm_overwrite: Callable[[str, int], tuple[str, bool]] = _confirm_overwrite_dialog,
         settings_path: Path | None = None,
         ask_settings: Callable[[Settings], Settings | None] = _settings_dialog,
+        local_roots: Callable[[], list[Root]] = local_roots,
     ):
         super().__init__()
         # Without a path nothing is read or written (tests, throwaway windows).
@@ -166,33 +172,28 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("nexplorer")
         self._local_addresses = local_addresses
 
-        self._waiting = QLabel()
-        self._waiting.setTextFormat(Qt.PlainText)
-        self._waiting.setAlignment(Qt.AlignCenter)
-        self._waiting.setWordWrap(True)
-        self._connected = QLabel()
         self._next_pane = NextPane()
-        self._connected_page = QWidget()
-        page = QVBoxLayout(self._connected_page)
-        page.addWidget(self._connected)
-        page.addWidget(self._next_pane, 1)
-        self._stack = QStackedWidget()
-        self._stack.addWidget(self._waiting)
-        self._stack.addWidget(self._connected_page)
+        self._card = self._build_waiting_card()
+        self._next_pane.show_card(self._card)
+        self._state = "waiting"
 
         root = QWidget()
         start = self._settings.local_folder
-        self._local_pane = LocalPane(start if os.path.isdir(start) else os.path.expanduser("~"))
+        self._local_pane = LocalPane(start if os.path.isdir(start) else os.path.expanduser("~"), local_roots)
         self._next_pane.preferred_path = self._settings.next_folder
         self._local_pane.set_sort(self._settings.local_sort)
         self._next_pane.set_sort(self._settings.next_sort)
         self._local_pane.set_show_hidden(self._settings.show_hidden)
         self._next_pane.set_show_hidden(self._settings.show_hidden)
-        row = QHBoxLayout()
-        row.addWidget(self._pane(tr("Local"), self._local_pane))
-        row.addWidget(self._pane(tr("Next"), self._stack))
+        self._splitter = QSplitter(Qt.Horizontal)
+        self._splitter.setChildrenCollapsible(False)
+        self._splitter.addWidget(self._local_pane)
+        self._splitter.addWidget(self._next_pane)
+        self._splitter.setSizes(list(self._settings.splitter) or [1, 1])
         panes_page = QWidget()
-        panes_page.setLayout(row)
+        page = QHBoxLayout(panes_page)
+        page.setContentsMargins(0, 0, 0, 0)
+        page.addWidget(self._splitter)
         self._compare_view = CompareView()
         self._views = QStackedWidget()
         self._views.addWidget(panes_page)
@@ -202,19 +203,19 @@ class MainWindow(QMainWindow):
         self._send.clicked.connect(self.send_selected)
         self._receive = QPushButton(tr("\u2190 Receive"))
         self._receive.clicked.connect(self.receive_selected)
-        self._new_folder = QPushButton(tr("New folder on Next"))
+        self._new_folder = QPushButton(tr("New folder"))
         self._new_folder.clicked.connect(self.new_folder)
-        self._rename = QPushButton(tr("Rename on Next"))
+        self._rename = QPushButton(tr("Rename"))
         self._rename.clicked.connect(self.rename_selected)
-        self._copy = QPushButton(tr("Copy on Next"))
+        self._copy = QPushButton(tr("Copy"))
         self._copy.clicked.connect(self.copy_selected)
-        self._cut = QPushButton(tr("Cut on Next"))
+        self._cut = QPushButton(tr("Cut"))
         self._cut.clicked.connect(self.cut_selected)
-        self._paste = QPushButton(tr("Paste on Next"))
+        self._paste = QPushButton(tr("Paste"))
         self._paste.clicked.connect(self.paste)
         self._compare = QPushButton(tr("Compare"))
         self._compare.clicked.connect(self.compare)
-        self._delete = QPushButton(tr("Delete on Next"))
+        self._delete = QPushButton(tr("Delete"))
         self._delete.clicked.connect(self.delete_selected)
         actions = QHBoxLayout()
         actions.addWidget(self._send)
@@ -252,6 +253,9 @@ class MainWindow(QMainWindow):
         op.addWidget(self._cancel_button)
         self._summary = QLabel()
         self._summary.setTextFormat(Qt.PlainText)
+        self._connection = QLabel()
+        self._selection = QLabel()
+        self._selection.setTextFormat(Qt.PlainText)
         self._dot_notice = QLabel()
         self._dot_notice.setTextFormat(Qt.PlainText)
         self._dot_notice.hide()
@@ -270,15 +274,21 @@ class MainWindow(QMainWindow):
         self._operation.disconnected.connect(self._on_disconnected)
         self._operation.checked.connect(self._on_checked)
         self._next_pane.selection_changed.connect(self._update_actions)
+        self._local_pane.selection_changed.connect(lambda: self._show_selection(self._local_pane))
+        self._next_pane.selection_changed.connect(lambda: self._show_selection(self._next_pane))
 
         column = QVBoxLayout(root)
         column.addLayout(actions)
         column.addWidget(self._views, 1)
-        column.addWidget(self._summary)
-        column.addWidget(self._dot_notice)
-        column.addWidget(self._op_row)
         self.setCentralWidget(root)
-        self.resize(900, 500)
+        bar = self.statusBar()
+        bar.addWidget(self._connection)
+        bar.addWidget(self._summary, 1)
+        bar.addWidget(self._dot_notice)
+        bar.addPermanentWidget(self._op_row)
+        bar.addPermanentWidget(self._selection)
+        self.setMinimumSize(800, 450)
+        self.resize(1100, 650)
         if self._settings.geometry:
             self.restoreGeometry(base64.b64decode(self._settings.geometry))
 
@@ -305,22 +315,66 @@ class MainWindow(QMainWindow):
         self._bridge.dot_unanswered.connect(self._on_dot_unanswered)
         self._bridge.session_ended.connect(self._show_waiting)
 
-    @staticmethod
-    def _pane(title: str, body: QWidget) -> QWidget:
-        box = QWidget()
-        col = QVBoxLayout(box)
-        head = QLabel(title)
-        head.setStyleSheet("font-weight: bold")
-        col.addWidget(head)
-        col.addWidget(body, 1)
-        return box
+    def _build_waiting_card(self) -> QWidget:
+        """The centred card shown in place of the ZX Spectrum Next list while nothing is connected."""
+        card = QFrame()
+        card.setFrameShape(QFrame.StyledPanel)
+        icon = QLabel()
+        icon.setPixmap(self.style().standardIcon(QStyle.SP_ComputerIcon).pixmap(48, 48))
+        icon.setAlignment(Qt.AlignCenter)
+        title = QLabel(tr("Waiting for a ZX Spectrum Next"))
+        title.setStyleSheet("font-weight: bold")
+        title.setAlignment(Qt.AlignCenter)
+        self._card_addresses = QLabel()
+        self._card_addresses.setTextFormat(Qt.PlainText)
+        self._card_addresses.setAlignment(Qt.AlignCenter)
+        run = QLabel(tr("On the ZX Spectrum Next, run:"))
+        run.setAlignment(Qt.AlignCenter)
+        self._card_command = QLabel(SYNC_COMMAND)
+        self._card_command.setStyleSheet("font-family: monospace")
+        self._card_command.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self._copy_button = QPushButton(tr("Copy"))
+        self._copy_button.clicked.connect(lambda: QApplication.clipboard().setText(SYNC_COMMAND))
+        command_row = QHBoxLayout()
+        command_row.addStretch(1)
+        command_row.addWidget(self._card_command)
+        command_row.addWidget(self._copy_button)
+        command_row.addStretch(1)
+        reminder = QLabel(tr("The Local address must match the one in") + f" {CONFIG_FILE}")
+        reminder.setWordWrap(True)
+        reminder.setAlignment(Qt.AlignCenter)
+        self._card_labels = [title, self._card_addresses, run, self._card_command, reminder]
+        inner = QVBoxLayout(card)
+        for widget in (icon, title, self._card_addresses, run):
+            inner.addWidget(widget)
+        inner.addLayout(command_row)
+        inner.addWidget(reminder)
+        outer = QWidget()
+        centred = QVBoxLayout(outer)
+        centred.addStretch(1)
+        row = QHBoxLayout()
+        row.addStretch(1)
+        row.addWidget(card, 4)
+        row.addStretch(1)
+        centred.addLayout(row)
+        centred.addStretch(1)
+        return outer
+
+    def _show_selection(self, pane) -> None:
+        """The status bar summarises the selection of the pane that changed last."""
+        entries = pane.selected_entries()
+        if not entries:
+            self._selection.setText("")
+            return
+        noun = tr("item") if len(entries) == 1 else tr("items")
+        self._selection.setText(f"{len(entries)} {noun}, {format_size(sum(e.size for e in entries))}")
 
     def _on_dot_version(self, version: str) -> None:
         """The dot announced its version ("" when it did not answer `Y`): grey what it lacks."""
         self._capabilities = capabilities(version or None)
         self._version_known = True
         missing = not self._capabilities.complete
-        text = tr("The dot on the Next is too old for some actions: update .sync5 to version") + f" {MINIMUM_DOT}"
+        text = tr("The dot on the ZX Spectrum Next is too old for some actions: update .sync5 to version") + f" {MINIMUM_DOT}"
         self._dot_notice.setText(text if missing else "")
         self._dot_notice.setVisible(missing)
         self._update_actions()
@@ -340,25 +394,20 @@ class MainWindow(QMainWindow):
         self._dot_notice.hide()
         self._clipboard = None
         self._next_pane.unbind()
-        lines = [tr("Waiting for a Next"), ""]
-        for name, ip in self._local_addresses():
-            lines.append(f"{name}: {ip}")
-        lines += [
-            "",
-            tr("On the Next, run:"),
-            SYNC_COMMAND,
-            "",
-            tr("The Local address must match the one in") + f" {CONFIG_FILE}",
-        ]
-        self._waiting.setText("\n".join(lines))
-        self._stack.setCurrentWidget(self._waiting)
+        self._card_addresses.setText("\n".join(f"{name}: {ip}" for name, ip in self._local_addresses()))
+        self._connection.setText(tr("Not connected"))
+        self._next_pane.set_controls_enabled(False)
+        self._next_pane.show_card(self._card)
+        self._state = "waiting"
         self._update_actions()
 
     def _show_connected(self, address: str) -> None:
-        self._connected.setText(
+        self._connection.setText(
             f'<span style="color:#2ecc40">\u25cf</span> {tr("Connected")} \u2014 {address}'
         )
-        self._stack.setCurrentWidget(self._connected_page)
+        self._next_pane.set_controls_enabled(True)
+        self._next_pane.show_list()
+        self._state = "connected"
 
     # -- send and receive
     def send_selected(self) -> None:
@@ -520,8 +569,8 @@ class MainWindow(QMainWindow):
         if not session or not folder or not entries or self._busy:
             return
         message = (
-            f"{tr('Delete')} {len(entries)} {tr('items')} {tr('from the Next')}, {tr('starting with')} \u00ab{entries[0].name}\u00bb?\n"
-            + tr("The Next has no recycle bin.")
+            f"{tr('Delete')} {len(entries)} {tr('items')} {tr('from the ZX Spectrum Next')}, {tr('starting with')} \u00ab{entries[0].name}\u00bb?\n"
+            + tr("The ZX Spectrum Next has no recycle bin.")
         )
         if self._confirm_delete(message):
             self._run(lambda progress, cancel: remove(session, folder, entries, progress, cancel))
@@ -799,11 +848,34 @@ class MainWindow(QMainWindow):
         return self._summary.text()
 
     def next_pane_state(self) -> str:
-        return "waiting" if self._stack.currentWidget() is self._waiting else "connected"
+        return self._state
 
     def next_pane_text(self) -> str:
-        widget = self._waiting if self.next_pane_state() == "waiting" else self._connected
-        return widget.text()
+        return self.waiting_card_text() if self._state == "waiting" else self.connection_text()
+
+    def waiting_card_text(self) -> str:
+        return "\n".join(label.text() for label in self._card_labels)
+
+    def click_copy_command(self) -> None:
+        self._copy_button.click()
+
+    def connection_text(self) -> str:
+        return self._connection.text()
+
+    def selection_summary(self) -> str:
+        return self._selection.text()
+
+    def status_bar_shows_dot_notice(self) -> bool:
+        return self._dot_notice.isVisibleTo(self) and self.statusBar().isAncestorOf(self._dot_notice)
+
+    def progress_visible(self) -> bool:
+        return self._op_row.isVisibleTo(self) and self._cancel_button.isVisibleTo(self)
+
+    def splitter_sizes(self) -> list[int]:
+        return self._splitter.sizes()
+
+    def set_splitter_sizes(self, sizes: list[int]) -> None:
+        self._splitter.setSizes(sizes)
 
     def next_pane(self) -> NextPane:
         return self._next_pane
@@ -839,6 +911,9 @@ class MainWindow(QMainWindow):
         s.local_folder = self._local_pane.path() or s.local_folder
         s.next_folder = self._next_pane.path() or s.next_folder
         s.local_sort, s.next_sort = self._local_pane.sort(), self._next_pane.sort()
+        sizes = self._splitter.sizes()
+        if len(sizes) == 2 and all(n > 0 for n in sizes):
+            s.splitter = tuple(sizes)
         s.geometry = base64.b64encode(bytes(self.saveGeometry())).decode()
         try:
             settings_store.save(s, self._settings_path)

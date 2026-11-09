@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import shutil
 import threading
 from typing import Callable, Protocol
 
@@ -13,6 +14,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QPushButton,
+    QStackedWidget,
     QTreeWidget,
     QTreeWidgetItem,
     QVBoxLayout,
@@ -21,6 +23,7 @@ from PySide6.QtWidgets import (
 
 from nexplorer.i18n import tr
 from nexplorer.listing import sort_entries
+from nexplorer.local_roots import Root, local_roots
 from nexplorer.protocol import Entry, RemoteError, Session
 
 
@@ -152,8 +155,21 @@ class _Loaded(QObject):
     done = Signal(int, str, object, str)  # request id, path, entries, error
 
 
+class _DriveCombo(QComboBox):
+    """The drive selector; tells its pane before the list drops down, so the choices can be re-read."""
+
+    opening = Signal()
+
+    def showPopup(self) -> None:
+        self.opening.emit()
+        super().showPopup()
+
+
 class FolderPane(QWidget):
-    def __init__(self, backend: Backend, path: str):
+    """One side: header, drive selector with free space, Up and address, list, status line.
+    Both sides share this layout so their rows line up."""
+
+    def __init__(self, backend: Backend, path: str, title: str = ""):
         super().__init__()
         self._backend = backend
         self._loaded = _Loaded()
@@ -180,17 +196,56 @@ class FolderPane(QWidget):
         self._address = QLineEdit(path)
         self._address.returnPressed.connect(lambda: self.go_to(self._address.text()))
         self._status = QLabel()
+        self._title = QLabel(title)
+        self._title.setStyleSheet("font-weight: bold")
+        self._drives = _DriveCombo()
+        self._drives.opening.connect(self.open_drive_selector)
+        self._drives.activated.connect(lambda _i: self.switch_drive(self._drives.currentText()))
+        self._free = QLabel()
+        self._stack = QStackedWidget()
+        self._stack.addWidget(self._tree)
         self.selection_changed = self._tree.itemSelectionChanged
         self._tree.itemActivated.connect(lambda item, _c: self.enter(item.text(0)))
         col = QVBoxLayout(self)
+        col.addWidget(self._title)
+        drive_bar = QHBoxLayout()
+        drive_bar.addWidget(QLabel(tr("Drive")))
+        drive_bar.addWidget(self._drives)
+        drive_bar.addWidget(self._free, 1)
+        col.addLayout(drive_bar)
         bar = QHBoxLayout()
         bar.addWidget(self._up)
         bar.addWidget(self._address, 1)
         col.addLayout(bar)
-        col.addWidget(self._tree)
+        col.addWidget(self._stack, 1)
         col.addWidget(self._status)
+        self._controls = (self._drives, self._up, self._address)
         if path:
             self.load(path)
+
+    # -- drives
+    def open_drive_selector(self) -> None:
+        """The drive choices are about to be shown (a subclass re-reads them)."""
+
+    def switch_drive(self, label: str) -> None:
+        """Show the drive the selector calls `label` (a subclass knows what that means)."""
+
+    def drives(self) -> list[str]:
+        return [self._drives.itemText(i) for i in range(self._drives.count())]
+
+    def free_space_text(self) -> str:
+        return self._free.text()
+
+    def set_controls_enabled(self, enabled: bool) -> None:
+        """Grey or enable the drive selector, Up and the address field; they stay visible."""
+        for widget in self._controls:
+            widget.setEnabled(enabled)
+
+    def controls_enabled(self) -> bool:
+        return self._address.isEnabled()
+
+    def controls_visible(self) -> bool:
+        return self._address.isVisibleTo(self) and self._up.isVisibleTo(self) and self._drives.isVisibleTo(self)
 
     # -- navigation
     def go_to(self, path: str) -> None:
@@ -334,11 +389,50 @@ class FolderPane(QWidget):
 
 
 class LocalPane(FolderPane):
-    def __init__(self, path: str):
-        super().__init__(LocalBackend(), path)
+    def __init__(self, path: str, roots: Callable[[], list[Root]] = local_roots):
+        self._roots_source = roots
+        self._roots: list[Root] = []
+        super().__init__(LocalBackend(), path, tr("Local"))
         self._tree.accept_next_entries = True
         self._tree.setAcceptDrops(True)
         self.next_entries_dropped = self._tree.next_entries_dropped
+        self.open_drive_selector()
+
+    def open_drive_selector(self) -> None:
+        """Read the roots again (a card may have been plugged in) and mark the one holding the folder."""
+        try:
+            self._roots = list(self._roots_source())
+        except OSError:
+            self._roots = []
+        self._drives.clear()
+        self._drives.addItems([label for label, _ in self._roots])
+        self._mark_current_root()
+
+    def _mark_current_root(self) -> None:
+        here = os.path.normcase(self._path)
+        best = max(
+            (r for r in self._roots if here.startswith(os.path.normcase(r[1]))),
+            key=lambda r: len(r[1]),
+            default=None,
+        )
+        if best is not None:
+            self._drives.setCurrentText(best[0])
+
+    def switch_drive(self, label: str) -> None:
+        for name, path in self._roots:
+            if name == label:
+                self.load(path)
+                return
+
+    def _on_loaded(self, request: int, path: str, entries: list, error: str) -> None:
+        super()._on_loaded(request, path, entries, error)
+        if request != self._request or error:
+            return
+        self._mark_current_root()
+        try:
+            self._free.setText(f"{format_size(shutil.disk_usage(path).free)} {tr('free')}")
+        except OSError:
+            self._free.setText("")
 
 
 class NextBackend:
@@ -351,11 +445,11 @@ class NextBackend:
     def list(self, path: str) -> list[Entry]:
         session = self.session
         if session is None:
-            raise ConnectionError(tr("No Next connected"))
+            raise ConnectionError(tr("No ZX Spectrum Next connected"))
         # Any path on an unmounted or floppy drive crashes the dot: only the
         # drives the Next reported are ever sent (docs/protocol.md, `W`).
         if len(path) < 2 or path[1] != ":" or path[0].upper() not in self.allowed_drives:
-            raise PermissionError(tr("Drive not available on the Next"))
+            raise PermissionError(tr("Drive not available on the ZX Spectrum Next"))
         return session.list_dir(path, timeout=60)
 
     def join(self, path: str, name: str) -> str:
@@ -380,7 +474,7 @@ class NextPane(FolderPane):
 
     def __init__(self):
         self._next = NextBackend()
-        super().__init__(self._next, "")
+        super().__init__(self._next, "", tr("ZX Spectrum Next"))
         self._tree.accept_urls = True
         self._tree.setAcceptDrops(True)
         self._tree.accept_next_entries = True
@@ -395,14 +489,6 @@ class NextPane(FolderPane):
         self.files_dropped = self._tree.urls_dropped
         self._info = _Info()
         self._info.done.connect(self._on_info)
-        self._drives = QComboBox()
-        self._drives.activated.connect(lambda _i: self.switch_drive(self._drives.currentText()))
-        self._free = QLabel()
-        bar = QHBoxLayout()
-        bar.addWidget(QLabel(tr("Drive")))
-        bar.addWidget(self._drives)
-        bar.addWidget(self._free, 1)
-        self.layout().insertLayout(0, bar)
         self._drive = ""
         self.preferred_path = ""  # folder to reopen on the next Session, if its drive is there
         self._fallback = ""  # drive root to show if the preferred folder cannot be listed
@@ -504,9 +590,11 @@ class NextPane(FolderPane):
     def session(self) -> Session | None:
         return self._next.session
 
-    # -- observation points for tests
-    def drives(self) -> list[str]:
-        return [self._drives.itemText(i) for i in range(self._drives.count())]
+    def show_card(self, card: QWidget) -> None:
+        """Show `card` in place of the list (nothing to browse yet)."""
+        if self._stack.indexOf(card) < 0:
+            self._stack.addWidget(card)
+        self._stack.setCurrentWidget(card)
 
-    def free_space_text(self) -> str:
-        return self._free.text()
+    def show_list(self) -> None:
+        self._stack.setCurrentWidget(self._tree)

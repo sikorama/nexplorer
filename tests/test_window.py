@@ -570,13 +570,12 @@ def test_declining_the_delete_confirmation_deletes_nothing(app, window):
     nxt.drop()
 
 
-def test_next_buttons_name_the_next_and_follow_the_selection(app, window):
+def test_next_actions_follow_the_selection(app, window):
     w, listener = window
     assert not w.delete_enabled() and not w.rename_enabled()  # no Session yet
     nxt = connect_next(app, w, listener)
     pane = w.next_pane()
     assert pump(app, lambda: "games" in pane.names())
-    assert all("Next" in t for t in (w.delete_text(), w.rename_text(), w.new_folder_text()))
     assert w.new_folder_enabled()
     assert not w.delete_enabled() and not w.rename_enabled()  # nothing selected
     pane.select(["readme.txt"])
@@ -588,7 +587,7 @@ def test_next_buttons_name_the_next_and_follow_the_selection(app, window):
     nxt.drop()
 
 
-def test_the_delete_confirmation_says_it_deletes_on_the_next(app, window):
+def test_the_delete_confirmation_names_the_zx_spectrum_next(app, window):
     w, listener = window
     nxt = connect_next(app, w, listener)
     pane = w.next_pane()
@@ -596,7 +595,7 @@ def test_the_delete_confirmation_says_it_deletes_on_the_next(app, window):
     pane.select(["readme.txt"])
     w.prompts.confirm = False
     w.delete_selected()
-    assert "Next" in w.prompts.confirmations[0]
+    assert "ZX Spectrum Next" in w.prompts.confirmations[0]
     nxt.drop()
 
 
