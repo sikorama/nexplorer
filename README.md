@@ -12,6 +12,31 @@ Features:
 - Compare one Local folder with one Next folder.
 - Themes **Light**, **Dark** and **System** (follows the desktop), and the interface language, in Settings.
 
+## Download
+
+Get the latest files from the [Releases page](../../releases/latest) (`X.Y.Z` is the version). No Python is needed.
+
+| System | File |
+| --- | --- |
+| Windows (x64) | `nexplorer-vX.Y.Z-windows-x64.zip` |
+| Linux (x86_64) | `nexplorer-vX.Y.Z-linux-x86_64.AppImage` |
+
+**Windows.** Unpack the zip anywhere and run `nexplorer.exe` from the `nexplorer-vX.Y.Z` folder.
+
+- The program is not signed, so SmartScreen shows "Windows protected your PC" at the first launch. Click **More info**, then **Run anyway**.
+- nexplorer listens on port 2048, so Windows Firewall asks whether to allow it. Allow it on your private network, otherwise the Next cannot connect.
+
+**Linux.** Make the file executable and run it:
+
+```
+chmod +x nexplorer-vX.Y.Z-linux-x86_64.AppImage
+./nexplorer-vX.Y.Z-linux-x86_64.AppImage
+```
+
+The AppImage needs FUSE 2 (package `libfuse2`, or `libfuse2t64` on recent Ubuntu); without it, run it with `--appimage-extract-and-run`. It carries the other libraries it needs. It is built on Ubuntu 22.04, so the system needs glibc 2.35 or later. Allow incoming connections on port 2048 in your firewall.
+
+Settings are kept in your user profile, not next to the program, so a new version keeps them.
+
 ## Run from a source checkout
 
 Requirements: Python 3.10 or later.

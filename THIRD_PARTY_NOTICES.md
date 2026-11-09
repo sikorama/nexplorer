@@ -11,7 +11,7 @@ Parts of nexplorer reuse or derive from ZX-Next-Unite (its Remote Explorer liste
 ```
 MIT License
 
-Copyright (c) <YEAR> <COPYRIGHT HOLDER OF ZX-NEXT-UNITE>   [PLACEHOLDER: to be filled in by the repository owner from the ZX-Next-Unite LICENSE file]
+Copyright (c) 2026 Julien Clauzel
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
@@ -47,3 +47,15 @@ Permission to use, copy, modify, and/or distribute this software for any purpose
 
 THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 ```
+
+## Qt and PySide6
+
+The graphical interface uses Qt through PySide6 (the Qt for Python bindings), which are distributed under the GNU Lesser General Public Licence version 3 (LGPLv3). nexplorer is not a modification of Qt or PySide6. The packaged builds ship them as separate, dynamically loaded libraries (in the `_internal` folder of the Windows zip and inside the AppImage), which you can replace with another build of the same version of the libraries. Sources and licence texts: <https://www.qt.io/> and <https://doc.qt.io/qtforpython-6/>.
+
+## send2trash
+
+Moving a file to the trash on the Local side uses Send2Trash, distributed under the BSD 3-Clause licence.
+
+## Python
+
+The packaged builds include the Python runtime, distributed under the Python Software Foundation Licence, and are assembled with PyInstaller (GPLv2 with an exception that allows the bundled program to be distributed under any licence).
