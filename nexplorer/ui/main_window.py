@@ -34,7 +34,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from nexplorer import overwrite
+from nexplorer import local_ops, overwrite
 from nexplorer import settings as settings_store
 from nexplorer.capabilities import MINIMUM_DOT, Capabilities, capabilities
 from nexplorer.i18n import available_languages, set_language, tr
@@ -48,6 +48,7 @@ from nexplorer.compare import (
     recompare,
     verify as verify_rows,
 )
+from nexplorer.local_ops import Trash, system_trash
 from nexplorer.local_roots import Root, local_roots
 from nexplorer.protocol import Listener, RemoteError
 from nexplorer.transfer import Result, copy, is_plain_name, make_folder, move, receive, remove, rename, send
@@ -92,6 +93,17 @@ def _confirm_delete_dialog(message: str) -> bool:
         None, tr("Delete"), message, QMessageBox.Yes | QMessageBox.Cancel, QMessageBox.Cancel
     )
     return answer == QMessageBox.Yes
+
+
+def _confirm_permanent_dialog(message: str) -> bool:
+    """The trash failed: delete for good or Cancel (the default)."""
+    box = QMessageBox(QMessageBox.Warning, tr("Delete"), message)
+    delete_button = box.addButton(tr("Delete permanently"), QMessageBox.DestructiveRole)
+    cancel_button = box.addButton(tr("Cancel"), QMessageBox.RejectRole)
+    box.setDefaultButton(cancel_button)
+    box.setEscapeButton(cancel_button)
+    box.exec()
+    return box.clickedButton() is delete_button
 
 
 def _confirm_overwrite_dialog(path: str, remaining: int) -> tuple[str, bool]:
@@ -174,8 +186,12 @@ class MainWindow(QMainWindow):
         ask_settings: Callable[[Settings], Settings | None] = _settings_dialog,
         local_roots: Callable[[], list[Root]] = local_roots,
         show_about: Callable[[], None] = _about_dialog,
+        trash: Trash = system_trash,
+        confirm_permanent: Callable[[str], bool] = _confirm_permanent_dialog,
     ):
         super().__init__()
+        self._trash, self._confirm_permanent = trash, confirm_permanent
+        self._local_clipboard: tuple[str, str, list[str]] | None = None  # ("copy" or "cut", folder, names)
         self._show_about = show_about
         self._active = LOCAL  # the pane that last had focus: the actions apply to it
         # Without a path nothing is read or written (tests, throwaway windows).
@@ -293,6 +309,7 @@ class MainWindow(QMainWindow):
         self._next_pane.files_dropped.connect(self.drop_files)
         self._local_pane.next_entries_dropped.connect(lambda names, _row: self.drop_next_entries(names))
         self._next_pane.entries_moved.connect(self.move_dropped)
+        self._local_pane.local_entries_dropped.connect(self.drop_local_entries)
         self._bridge.session_ready.connect(self._next_pane.bind)
         self._bridge.session_ready.connect(lambda _s: self._update_actions())
         self._bridge.dot_version.connect(self._on_dot_version)
@@ -366,6 +383,7 @@ class MainWindow(QMainWindow):
             next=Binding(lambda: connected() and at_rest(), lambda: self._next_pane.reload()),
         )
         a.define("about", tr("About"), both=Binding(always, self._show_about))
+        self._bind_local_actions()
 
     def _build_menus(self) -> None:
         a = self._actions.action
@@ -670,7 +688,7 @@ class MainWindow(QMainWindow):
     def _mark(self, mode: str) -> None:
         entries = self._next_pane.selected_entries()
         if self._next_pane.session() is not None and entries and self._capabilities.copy:
-            self._clipboard = (mode, self._next_pane.path(), entries)
+            self._clipboard, self._local_clipboard = (mode, self._next_pane.path(), entries), None
             self._update_actions()
 
     def paste(self) -> None:
@@ -707,10 +725,96 @@ class MainWindow(QMainWindow):
             return
         message = (
             f"{tr('Delete')} {len(entries)} {tr('items')} {tr('from the ZX Spectrum Next')}, {tr('starting with')} \u00ab{entries[0].name}\u00bb?\n"
-            + tr("The ZX Spectrum Next has no recycle bin.")
+            + tr("The deletion is permanent: the ZX Spectrum Next has no trash.")
         )
         if self._confirm_delete(message):
             self._run(lambda progress, cancel: remove(session, folder, entries, progress, cancel))
+
+    # -- changes on Local (the operations live in `local_ops`)
+    def _bind_local_actions(self) -> None:
+        a = self._actions
+
+        def free() -> bool:
+            return not self._busy
+
+        def selected() -> int:
+            return len(self._local_pane.selected_names())
+
+        for key, enabled, run in (
+            ("new_folder", free, self.local_new_folder),
+            ("rename", lambda: free() and selected() == 1, self.local_rename),
+            ("delete", lambda: free() and selected() >= 1, self.local_delete),
+            ("copy", lambda: free() and selected() >= 1, lambda: self._local_mark("copy")),
+            ("cut", lambda: free() and selected() >= 1, lambda: self._local_mark("cut")),
+            ("paste", lambda: free() and self._local_clipboard is not None, self.local_paste),
+        ):
+            a.bind(key, LOCAL, Binding(enabled, run))
+
+    def local_new_folder(self) -> None:
+        folder = self._local_pane.path()
+        name = self._ask_name(tr("New folder"), "") if folder and not self._busy else None
+        if name and self._plain(name):
+            self._run(lambda progress, cancel: local_ops.make_folder(folder, name))
+
+    def local_rename(self) -> None:
+        folder, names = self._local_pane.path(), self._local_pane.selected_names()
+        if not folder or len(names) != 1 or self._busy:
+            return
+        new = self._ask_name(tr("Rename"), names[0])
+        if new and new != names[0] and self._plain(new):
+            self._run(lambda progress, cancel: local_ops.rename(folder, names[0], new))
+
+    def _local_mark(self, mode: str) -> None:
+        names = self._local_pane.selected_names()
+        if names:
+            self._local_clipboard, self._clipboard = (mode, self._local_pane.path(), names), None
+            self._update_actions()
+
+    def local_paste(self) -> None:
+        """Copy or move the marked Local entries into the Local folder shown."""
+        target = self._local_pane.path()
+        if not target or self._local_clipboard is None or self._busy:
+            return
+        mode, source, names = self._local_clipboard
+        action = local_ops.move if mode == "cut" else local_ops.copy
+        self._clear_clipboard_if_clean = mode == "cut"  # a failed move can be retried
+        self._run(lambda progress, cancel: action(source, names, target, progress, cancel))
+
+    def drop_local_entries(self, names: list[str], row: str, copy: bool = False) -> None:
+        """Local entries dropped on a folder row of the Local pane: move them (Shift: copy)."""
+        source = self._local_pane.path()
+        target = self._local_pane.folder_path(row) if row else ""
+        if not source or not target or row in names or self._busy:
+            return
+        action = local_ops.copy if copy else local_ops.move
+        self._clear_clipboard_if_clean = False
+        self._run(lambda progress, cancel: action(source, names, target, progress, cancel))
+
+    def local_delete(self) -> None:
+        """Send the selected Local entries to the trash once confirmed; what the trash cannot
+        take can be deleted for good, after a second confirmation."""
+        folder, names = self._local_pane.path(), self._local_pane.selected_names()
+        if not folder or not names or self._busy:
+            return
+        message = (
+            f"{tr('Delete')} {len(names)} {tr('items')} {tr('to the trash')}, "
+            f"{tr('starting with')} \u00ab{names[0]}\u00bb?"
+        )
+        if not self._confirm_delete(message):
+            return
+        result = local_ops.trash_entries(folder, names, self._trash)
+        failed = [f.name for f in result.failures]
+        if failed and self._confirm_permanent(
+            f"{tr('The trash cannot take')} {len(failed)} {tr('items')}: "
+            + ", ".join(f"\u00ab{n}\u00bb" for n in failed)
+            + f"\n{tr('Delete them permanently?')}"
+        ):
+            self._local_pane.reload()
+            self._run(lambda progress, cancel: local_ops.delete_entries(folder, failed, progress, cancel))
+            return
+        self._show_outcome(result)
+        self._local_pane.reload()
+        self._update_actions()
 
     # -- compare
     def compare(self) -> None:
@@ -895,8 +999,19 @@ class MainWindow(QMainWindow):
         if isinstance(outcome, Result) and self._clear_clipboard_if_clean and not (
             outcome.failures or outcome.cancelled
         ):
-            self._clipboard = None
+            self._clipboard = self._local_clipboard = None
         self._clear_clipboard_if_clean = False
+        self._show_outcome(outcome)
+        self._next_pane.reload()
+        self._local_pane.reload()
+        if self._fresh_rows is not None:
+            self._compare_view.set_rows(self._fresh_rows)
+            self._fresh_rows = None
+        self._compare_view.refresh()
+        self._update_actions()
+
+    def _show_outcome(self, outcome) -> None:
+        """The summary line: how an operation ended, one line per entry that failed."""
         if isinstance(outcome, Result):
             lines = [f"{f.name}: {f.reason}" for f in outcome.failures]
             head = tr("Cancelled") if outcome.cancelled else tr("Done")
@@ -907,13 +1022,6 @@ class MainWindow(QMainWindow):
             self._summary.setText("\n".join([head, *lines]))
         else:
             self._summary.setText(f"{tr('Failed')}: {outcome}")
-        self._next_pane.reload()
-        self._local_pane.reload()
-        if self._fresh_rows is not None:
-            self._compare_view.set_rows(self._fresh_rows)
-            self._fresh_rows = None
-        self._compare_view.refresh()
-        self._update_actions()
 
     def _update_actions(self) -> None:
         """Actions follow the active pane, the Session, the capabilities and the selection,
