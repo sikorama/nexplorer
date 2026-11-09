@@ -3,7 +3,7 @@ from __future__ import annotations
 import base64
 import os
 import threading
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Callable
 
@@ -167,6 +167,17 @@ def _settings_dialog(current: Settings) -> Settings | None:
     )
 
 
+@dataclass(frozen=True)
+class _Clip:
+    """The window's one clipboard: where the entries were marked and whether they are copied or moved.
+    `items` are Local names or Next entries, according to `side`."""
+
+    side: str
+    folder: str
+    items: list
+    mode: str  # "copy" or "cut"
+
+
 class _Operation(QObject):
     progress = Signal(str, int)
     finished = Signal(object)  # transfer.Result, or the exception that ended it
@@ -191,7 +202,6 @@ class MainWindow(QMainWindow):
     ):
         super().__init__()
         self._trash, self._confirm_permanent = trash, confirm_permanent
-        self._local_clipboard: tuple[str, str, list[str]] | None = None  # ("copy" or "cut", folder, names)
         self._show_about = show_about
         self._active = LOCAL  # the pane that last had focus: the actions apply to it
         # Without a path nothing is read or written (tests, throwaway windows).
@@ -220,8 +230,11 @@ class MainWindow(QMainWindow):
         self._splitter = QSplitter(Qt.Horizontal)
         self._splitter.setChildrenCollapsible(False)
         self._splitter.addWidget(self._local_pane)
+        self._centre = self._build_centre_column()
+        self._splitter.addWidget(self._centre)
         self._splitter.addWidget(self._next_pane)
-        self._splitter.setSizes(list(self._settings.splitter) or [1, 1])
+        self._splitter.setCollapsible(1, False)
+        self.set_splitter_sizes(list(self._settings.splitter) or [1, 1])
         panes_page = QWidget()
         page = QHBoxLayout(panes_page)
         page.setContentsMargins(0, 0, 0, 0)
@@ -267,7 +280,7 @@ class MainWindow(QMainWindow):
         self._operation.progress.connect(self._on_progress)
         self._operation.finished.connect(self._on_finished)
         self._disconnecting = False
-        self._clipboard: tuple[str, str, list] | None = None  # ("copy" or "cut", Next folder, entries)
+        self._clipboard: _Clip | None = None
         self._clear_clipboard_if_clean = False
         self._operation.disconnected.connect(self._on_disconnected)
         self._operation.checked.connect(self._on_checked)
@@ -277,6 +290,8 @@ class MainWindow(QMainWindow):
             pane = self._pane(side)
             pane.focused.connect(lambda side=side: self.activate_pane(side))
             pane.context_requested.connect(lambda row, pos, side=side: self._popup_context(side, row, pos))
+        self._local_pane.file_activated.connect(self.send_file)
+        self._next_pane.file_activated.connect(self.receive_file)
         self._local_pane.set_active(True)
         self._local_pane.selection_changed.connect(lambda: self._show_selection(self._local_pane))
         self._next_pane.selection_changed.connect(lambda: self._show_selection(self._next_pane))
@@ -355,7 +370,7 @@ class MainWindow(QMainWindow):
         a.define("copy", tr("Copy"), "Ctrl+C", next=Binding(lambda: can_copy() and selected() >= 1, self.copy_selected))
         a.define("cut", tr("Cut"), "Ctrl+X", next=Binding(lambda: can_copy() and selected() >= 1, self.cut_selected))
         a.define(
-            "paste", tr("Paste"), "Ctrl+V", next=Binding(lambda: can_copy() and self._clipboard is not None, self.paste)
+            "paste", tr("Paste"), "Ctrl+V", next=Binding(lambda: self._can_paste(NEXT), self.paste)
         )
         a.define(
             "select_all",
@@ -364,8 +379,19 @@ class MainWindow(QMainWindow):
             local=Binding(always, self._local_pane.select_all),
             next=Binding(lambda: connected() and at_rest(), self._next_pane.select_all),
         )
-        a.define("send", tr("Send"), both=Binding(idle, self.send_selected))
-        a.define("receive", tr("Receive"), both=Binding(idle, self.receive_selected))
+        def local_selected() -> bool:
+            return bool(self._local_pane.selected_names())
+
+        a.define("send", tr("Send"), both=Binding(lambda: idle() and local_selected(), self.send_selected))
+        a.define("receive", tr("Receive"), both=Binding(lambda: idle() and selected() >= 1, self.receive_selected))
+        a.define(  # F5: the active pane's selection goes to the other side; not in a menu
+            "transfer",
+            tr("Transfer"),
+            "F5",
+            local=Binding(lambda: idle() and local_selected(), self.send_selected),
+            next=Binding(lambda: idle() and selected() >= 1, self.receive_selected),
+        )
+        self.addAction(a.action("transfer"))
         a.define("compare", tr("Compare"), both=Binding(idle, self.compare))
         a.define(
             "disconnect",
@@ -378,12 +404,28 @@ class MainWindow(QMainWindow):
         a.define(
             "refresh",
             tr("Refresh"),
-            "F5",
+            "Ctrl+R",
             local=Binding(always, lambda: self._local_pane.reload()),
             next=Binding(lambda: connected() and at_rest(), lambda: self._next_pane.reload()),
         )
         a.define("about", tr("About"), both=Binding(always, self._show_about))
         self._bind_local_actions()
+
+    def _build_centre_column(self) -> QWidget:
+        """Send (right arrow) and Receive (left arrow) between the panes; they follow the
+        enablement of the shared actions."""
+        column = QWidget()
+        column.setFixedWidth(52)
+        layout = QVBoxLayout(column)
+        layout.addStretch(1)
+        self._send_button, self._receive_button = QPushButton("\u2192"), QPushButton("\u2190")
+        for button, key, text in ((self._send_button, "send", tr("Send")), (self._receive_button, "receive", tr("Receive"))):
+            button.setToolTip(text)
+            button.setAccessibleName(text)
+            button.clicked.connect(lambda _c=False, key=key: self._actions.action(key).trigger())
+            layout.addWidget(button)
+        layout.addStretch(1)
+        return column
 
     def _build_menus(self) -> None:
         a = self._actions.action
@@ -547,7 +589,8 @@ class MainWindow(QMainWindow):
         self._version_known = False
         self._dot_notice.setText("")
         self._dot_notice.hide()
-        self._clipboard = None
+        if self._clipboard is not None and self._clipboard.side == NEXT:
+            self._clipboard = None
         self._next_pane.unbind()
         self._card_addresses.setText("\n".join(f"{name}: {ip}" for name, ip in self._local_addresses()))
         self._connection.setText(tr("Not connected"))
@@ -572,6 +615,20 @@ class MainWindow(QMainWindow):
         folder = self._next_pane.path()
         if session and paths and folder:
             self._send_checked(session, paths, folder)
+
+    def send_file(self, name: str) -> None:
+        """Double-click on a Local file: send it to the Next folder shown."""
+        session, folder = self._next_pane.session(), self._next_pane.path()
+        if session and folder and not self._busy:
+            self._send_checked(session, [os.path.join(self._local_pane.path(), name)], folder)
+
+    def receive_file(self, name: str) -> None:
+        """Double-click on a Next file: receive it into the Local folder shown."""
+        session = self._next_pane.session()
+        entries = [e for e in self._next_pane.entries() if e.name == name and not e.is_dir]
+        source, target = self._next_pane.path(), self._local_pane.path()
+        if session and entries and source and target and not self._busy:
+            self._receive_checked(session, source, entries, target)
 
     def drop_files(self, paths: list[str], subfolder: str = "") -> None:
         """Files dropped on the Next pane: send them into the folder shown, or the subfolder hit."""
@@ -688,18 +745,31 @@ class MainWindow(QMainWindow):
     def _mark(self, mode: str) -> None:
         entries = self._next_pane.selected_entries()
         if self._next_pane.session() is not None and entries and self._capabilities.copy:
-            self._clipboard, self._local_clipboard = (mode, self._next_pane.path(), entries), None
+            self._clipboard = _Clip(NEXT, self._next_pane.path(), entries, mode)
             self._update_actions()
 
+    def _can_paste(self, side: str) -> bool:
+        """Paste on `side`: inside the side where the entries were marked, or across, for a copy only."""
+        clip = self._clipboard
+        if clip is None or self._busy:
+            return False
+        connected = self._next_pane.session() is not None
+        if clip.side == side:
+            return connected and self._capabilities.copy if side == NEXT else True
+        return clip.mode == "copy" and connected
+
     def paste(self) -> None:
-        """Copy or move the marked entries into the Next folder shown."""
-        session, target = self._next_pane.session(), self._next_pane.path()
-        if not session or not target or self._clipboard is None or self._busy or not self._capabilities.copy:
+        """Paste on the Next pane: copy or move the marked entries into the Next folder shown, or
+        send the copied Local entries there."""
+        session, target, clip = self._next_pane.session(), self._next_pane.path(), self._clipboard
+        if not session or not target or clip is None or not self._can_paste(NEXT):
             return
-        mode, source, entries = self._clipboard
-        action = move if mode == "cut" else copy
-        self._clear_clipboard_if_clean = mode == "cut"  # a failed move can be retried
-        self._run(lambda progress, cancel: action(session, source, entries, target, progress, cancel))
+        if clip.side == LOCAL:
+            self._send_checked(session, [os.path.join(clip.folder, n) for n in clip.items], target)
+            return
+        action = move if clip.mode == "cut" else copy
+        self._clear_clipboard_if_clean = clip.mode == "cut"  # a failed move can be retried
+        self._run(lambda progress, cancel: action(session, clip.folder, clip.items, target, progress, cancel))
 
     def move_dropped(self, names: list[str], row: str) -> None:
         """Next entries dropped on a folder row of the Next pane: move them into that folder."""
@@ -746,7 +816,7 @@ class MainWindow(QMainWindow):
             ("delete", lambda: free() and selected() >= 1, self.local_delete),
             ("copy", lambda: free() and selected() >= 1, lambda: self._local_mark("copy")),
             ("cut", lambda: free() and selected() >= 1, lambda: self._local_mark("cut")),
-            ("paste", lambda: free() and self._local_clipboard is not None, self.local_paste),
+            ("paste", lambda: self._can_paste(LOCAL), self.local_paste),
         ):
             a.bind(key, LOCAL, Binding(enabled, run))
 
@@ -767,18 +837,20 @@ class MainWindow(QMainWindow):
     def _local_mark(self, mode: str) -> None:
         names = self._local_pane.selected_names()
         if names:
-            self._local_clipboard, self._clipboard = (mode, self._local_pane.path(), names), None
+            self._clipboard = _Clip(LOCAL, self._local_pane.path(), names, mode)
             self._update_actions()
 
     def local_paste(self) -> None:
         """Copy or move the marked Local entries into the Local folder shown."""
-        target = self._local_pane.path()
-        if not target or self._local_clipboard is None or self._busy:
+        target, clip = self._local_pane.path(), self._clipboard
+        if not target or clip is None or not self._can_paste(LOCAL):
             return
-        mode, source, names = self._local_clipboard
-        action = local_ops.move if mode == "cut" else local_ops.copy
-        self._clear_clipboard_if_clean = mode == "cut"  # a failed move can be retried
-        self._run(lambda progress, cancel: action(source, names, target, progress, cancel))
+        if clip.side == NEXT:
+            self._receive_checked(self._next_pane.session(), clip.folder, clip.items, target)
+            return
+        action = local_ops.move if clip.mode == "cut" else local_ops.copy
+        self._clear_clipboard_if_clean = clip.mode == "cut"  # a failed move can be retried
+        self._run(lambda progress, cancel: action(clip.folder, clip.items, target, progress, cancel))
 
     def drop_local_entries(self, names: list[str], row: str, copy: bool = False) -> None:
         """Local entries dropped on a folder row of the Local pane: move them (Shift: copy)."""
@@ -999,7 +1071,7 @@ class MainWindow(QMainWindow):
         if isinstance(outcome, Result) and self._clear_clipboard_if_clean and not (
             outcome.failures or outcome.cancelled
         ):
-            self._clipboard = self._local_clipboard = None
+            self._clipboard = None
         self._clear_clipboard_if_clean = False
         self._show_outcome(outcome)
         self._next_pane.reload()
@@ -1027,6 +1099,8 @@ class MainWindow(QMainWindow):
         """Actions follow the active pane, the Session, the capabilities and the selection,
         and are greyed while one operation runs."""
         self._actions.refresh()
+        self._send_button.setEnabled(self._actions.action("send").isEnabled())
+        self._receive_button.setEnabled(self._actions.action("receive").isEnabled())
         self._actions.action("show_hidden").setChecked(self._settings.show_hidden)
         self._compare_view.set_busy(self._busy)
         self._compare_view.set_verify_available(self._capabilities.crc)
@@ -1111,11 +1185,19 @@ class MainWindow(QMainWindow):
     def progress_visible(self) -> bool:
         return self._op_row.isVisibleTo(self) and self._cancel_button.isVisibleTo(self)
 
+    def centre_button_enabled(self, which: str) -> bool:
+        return (self._send_button if which == "send" else self._receive_button).isEnabled()
+
+    def click_centre_button(self, which: str) -> None:
+        (self._send_button if which == "send" else self._receive_button).click()
+
     def splitter_sizes(self) -> list[int]:
-        return self._splitter.sizes()
+        """The widths of the two panes (the centre column is fixed)."""
+        left, _, right = self._splitter.sizes()
+        return [left, right]
 
     def set_splitter_sizes(self, sizes: list[int]) -> None:
-        self._splitter.setSizes(sizes)
+        self._splitter.setSizes([sizes[0], self._centre.width() or self._centre.minimumWidth(), sizes[1]])
 
     def next_pane(self) -> NextPane:
         return self._next_pane
@@ -1149,7 +1231,7 @@ class MainWindow(QMainWindow):
         s.local_folder = self._local_pane.path() or s.local_folder
         s.next_folder = self._next_pane.path() or s.next_folder
         s.local_sort, s.next_sort = self._local_pane.sort(), self._next_pane.sort()
-        sizes = self._splitter.sizes()
+        sizes = self.splitter_sizes()
         if len(sizes) == 2 and all(n > 0 for n in sizes):
             s.splitter = tuple(sizes)
         s.geometry = base64.b64encode(bytes(self.saveGeometry())).decode()

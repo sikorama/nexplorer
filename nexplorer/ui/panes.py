@@ -176,6 +176,7 @@ class FolderPane(QWidget):
 
     focused = Signal()  # the pane or one of its controls got the keyboard focus
     context_requested = Signal(str, object)  # row name ("" on empty space), global position
+    file_activated = Signal(str)  # a file row was double-clicked (Enter never emits it)
 
     def __init__(self, backend: Backend, path: str, title: str = ""):
         super().__init__()
@@ -216,6 +217,7 @@ class FolderPane(QWidget):
         self._stack.addWidget(self._tree)
         self.selection_changed = self._tree.itemSelectionChanged
         self._tree.itemActivated.connect(lambda item, _c: self.enter(item.text(0)))
+        self._tree.itemDoubleClicked.connect(lambda item, _c: self._on_double_click(item.text(0)))
         col = QVBoxLayout(self)
         col.addWidget(self._title)
         drive_bar = QHBoxLayout()
@@ -310,6 +312,10 @@ class FolderPane(QWidget):
 
     def go_up(self) -> None:
         self.load(self._backend.parent(self._path))
+
+    def _on_double_click(self, name: str) -> None:
+        if any(e.name == name and not e.is_dir for e in self._entries):
+            self.file_activated.emit(name)
 
     def enter(self, name: str) -> None:
         if any(e.name == name and e.is_dir for e in self._entries):

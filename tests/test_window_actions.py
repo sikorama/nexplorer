@@ -69,7 +69,7 @@ def test_the_menu_bar_has_five_menus_with_their_entries_and_shortcuts(app, windo
         "File": [("New folder", "Ctrl+Shift+N"), ("Rename", "F2"), ("Delete", "Del"), ("Settings", ""), ("Quit", "Ctrl+Q")],
         "Edit": [("Copy", "Ctrl+C"), ("Cut", "Ctrl+X"), ("Paste", "Ctrl+V"), ("Select all", "Ctrl+A")],
         "Transfer": [("Send", ""), ("Receive", ""), ("Compare", ""), ("Disconnect", "")],
-        "View": [("Show hidden files", ""), ("Sort by", ""), ("Refresh", "F5")],
+        "View": [("Show hidden files", ""), ("Sort by", ""), ("Refresh", "Ctrl+R")],
         "Help": [("About", "")],
     }
     for menu, items in expected.items():
