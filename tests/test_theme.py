@@ -70,6 +70,20 @@ def test_the_icons_are_tinted_to_the_theme(app, tmp_path):
     theme.apply(app, "light")
 
 
+def test_the_active_border_and_the_connection_dot_use_the_palette_and_follow_the_theme(app, tmp_path):
+    path = local_folder(tmp_path)
+    with opened(app, path) as (w, listener):
+        nxt = prepare(app, w, listener, tmp_path, NEXT_FS)
+        for choice in ("light", "dark", "light"):
+            w.apply_settings(Settings(theme=choice, local_folder=str(tmp_path / "local")))
+            colours = theme.PALETTES[choice]
+            assert colours["accent"] in w.local_pane().list_view().styleSheet()
+            assert colours["connected"] in w.connection_text()
+            assert "2ecc40" not in w.connection_text()
+        nxt.drop()
+    theme.apply(app, "light")
+
+
 def test_system_theme_follows_the_desktop_when_it_changes(app, tmp_path):
     scheme = [LIGHT]
     from PySide6.QtCore import QObject

@@ -1,5 +1,6 @@
 """Local pane: the shared actions (menu, shortcut, context menu) and the drag inside the pane."""
 import os
+import threading
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -22,8 +23,10 @@ class Trash:
     def __init__(self):
         self.fail = False
         self.sent = []
+        self.threads = []
 
     def __call__(self, path):
+        self.threads.append(threading.get_ident())
         if self.fail:
             raise OSError("trash unavailable")
         self.sent.append(path)
@@ -136,7 +139,8 @@ def test_when_the_trash_fails_permanent_deletion_is_offered_and_cancel_keeps_eve
     w.local_pane().select(["a.txt"])
     w.permanent.answer = False
     w.trigger_menu("File", "Delete")
-    assert len(w.permanent.asked) == 1 and "a.txt" in w.permanent.asked[0]
+    assert pump(app, lambda: len(w.permanent.asked) == 1)
+    assert "a.txt" in w.permanent.asked[0] and "trash unavailable" in w.permanent.asked[0]
     pump(app, lambda: False, timeout=0.2)
     assert (w.folder / "a.txt").exists() and not w.operation_running()
     assert "a.txt" in w.summary_text()
@@ -146,6 +150,14 @@ def test_when_the_trash_fails_permanent_deletion_is_offered_and_cancel_keeps_eve
     w.trigger_menu("File", "Delete")
     assert pump(app, lambda: not (w.folder / "a.txt").exists() and "a.txt" not in w.local_pane().names())
     assert (w.folder / "b.txt").exists()
+
+
+def test_the_trash_runs_off_the_ui_thread(app, window):
+    w, _ = window
+    w.local_pane().select(["a.txt"])
+    w.trigger_menu("File", "Delete")
+    assert pump(app, lambda: "a.txt" not in w.local_pane().names())
+    assert w.trash.threads and threading.get_ident() not in w.trash.threads
 
 
 def test_cut_then_paste_inside_local_moves_and_clears_the_clipboard(app, window):

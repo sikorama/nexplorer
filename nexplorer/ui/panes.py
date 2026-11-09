@@ -28,7 +28,7 @@ from nexplorer.i18n import tr
 from nexplorer.listing import sort_entries
 from nexplorer.local_roots import Root, local_roots
 from nexplorer.protocol import Entry, RemoteError, Session
-from nexplorer.ui import icons
+from nexplorer.ui import icons, theme
 
 
 def format_size(size: int) -> str:
@@ -237,6 +237,7 @@ class FolderPane(QWidget):
         self._tree.setContextMenuPolicy(Qt.CustomContextMenu)
         self._tree.customContextMenuRequested.connect(self._on_context_menu)
         self._active = False
+        self._accent = theme.PALETTES["light"]["accent"]
         self.set_active(False)
         if path:
             self.load(path)
@@ -250,9 +251,14 @@ class FolderPane(QWidget):
     def set_active(self, active: bool) -> None:
         """Mark the pane as the one the actions apply to: an accent border on its header and list."""
         self._active = active
-        colour = "palette(highlight)" if active else "transparent"
+        colour = self._accent if active else "transparent"
         self._title.setStyleSheet(f"font-weight: bold; border-bottom: 2px solid {colour}")
         self._tree.setStyleSheet(f"QTreeWidget {{ border: 2px solid {colour}; }}")
+
+    def set_theme(self, name: str) -> None:
+        """Take the active-border colour from the palette `name`."""
+        self._accent = theme.PALETTES[name]["accent"]
+        self.set_active(self._active)
 
     def is_active(self) -> bool:
         return self._active

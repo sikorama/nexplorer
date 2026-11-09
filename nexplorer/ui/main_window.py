@@ -136,6 +136,13 @@ def _about_dialog() -> None:
     )
 
 
+# Shared actions that target a pane: greyed while the Compare view replaces the panes.
+COMPARE_GREYED = (
+    "new_folder", "rename", "delete", "copy", "cut", "paste", "select_all",
+    "send", "receive", "transfer", "refresh",
+)  # fmt: skip
+
+
 def _theme_label(code: str) -> str:
     return {"light": tr("Light"), "dark": tr("Dark"), "system": tr("System")}[code]
 
@@ -216,6 +223,8 @@ class MainWindow(QMainWindow):
         super().__init__()
         self._color_scheme = color_scheme
         self._theme_name = "light"
+        self._address = ""
+        self._then: Callable | None = None
         self._trash, self._confirm_permanent = trash, confirm_permanent
         self._show_about = show_about
         self._active = LOCAL  # the pane that last had focus: the actions apply to it
@@ -481,6 +490,9 @@ class MainWindow(QMainWindow):
         self._theme_name = theme.apply(QApplication.instance(), self._settings.theme, self._color_scheme())
         self.set_icon_colour(theme.icon_colour(self._theme_name))
         self._compare_view.set_theme(self._theme_name)
+        self._local_pane.set_theme(self._theme_name)
+        self._next_pane.set_theme(self._theme_name)
+        self._show_connection()
 
     def current_theme(self) -> str:
         """The palette in use: light or dark (System resolved)."""
@@ -632,12 +644,18 @@ class MainWindow(QMainWindow):
         self._update_actions()
 
     def _show_connected(self, address: str) -> None:
-        self._connection.setText(
-            f'<span style="color:#2ecc40">\u25cf</span> {tr("Connected")} \u2014 {address}'
-        )
+        self._address = address
+        self._state = "connected"
+        self._show_connection()
         self._next_pane.set_controls_enabled(True)
         self._next_pane.show_list()
-        self._state = "connected"
+
+    def _show_connection(self) -> None:
+        """The status-bar connection text, its dot in the palette's `connected` colour."""
+        if self._state != "connected":
+            return
+        dot = theme.PALETTES[self._theme_name]["connected"]
+        self._connection.setText(f'<span style="color:{dot}">\u25cf</span> {tr("Connected")} \u2014 {self._address}')
 
     # -- send and receive
     def send_selected(self) -> None:
@@ -906,19 +924,18 @@ class MainWindow(QMainWindow):
         )
         if not self._confirm_delete(message):
             return
-        result = local_ops.trash_entries(folder, names, self._trash)
-        failed = [f.name for f in result.failures]
-        if failed and self._confirm_permanent(
-            f"{tr('The trash cannot take')} {len(failed)} {tr('items')}: "
-            + ", ".join(f"\u00ab{n}\u00bb" for n in failed)
-            + f"\n{tr('Delete them permanently?')}"
-        ):
-            self._local_pane.reload()
-            self._run(lambda progress, cancel: local_ops.delete_entries(folder, failed, progress, cancel))
-            return
-        self._show_outcome(result)
-        self._local_pane.reload()
-        self._update_actions()
+
+        def trashed(outcome) -> None:
+            failures = outcome.failures if isinstance(outcome, Result) else []
+            if failures and self._confirm_permanent(
+                f"{tr('The trash cannot take')} {len(failures)} {tr('items')}:\n"
+                + "\n".join(f"\u00ab{f.name}\u00bb: {f.reason}" for f in failures)
+                + f"\n{tr('Delete them permanently?')}"
+            ):
+                failed = [f.name for f in failures]
+                self._run(lambda progress, cancel: local_ops.delete_entries(folder, failed, progress, cancel))
+
+        self._run(lambda progress, cancel: local_ops.trash_entries(folder, names, self._trash, progress, cancel), trashed)
 
     # -- compare
     def compare(self) -> None:
@@ -1042,11 +1059,13 @@ class MainWindow(QMainWindow):
     def compare_rows(self) -> list[tuple[str, str, str, bool]]:
         return [(r.name, r.state, r.direction or "", r.checked) for r in self._compare_view.rows()]
 
-    def _run(self, work: Callable) -> None:
-        """Run one modifying operation off the UI thread; only one at a time."""
+    def _run(self, work: Callable, then: Callable | None = None) -> None:
+        """Run one modifying operation off the UI thread; only one at a time. `then` receives
+        the outcome on the UI thread once the operation is shown as finished."""
         if self._busy:
             return
         self._busy = True
+        self._then = then
         self._cancel.clear()
         self._cancel_button.setEnabled(True)
         self._cancel_button.setText(tr("Cancel"))
@@ -1116,6 +1135,9 @@ class MainWindow(QMainWindow):
             self._fresh_rows = None
         self._compare_view.refresh()
         self._update_actions()
+        then, self._then = self._then, None
+        if then is not None:
+            then(outcome)
 
     def _show_outcome(self, outcome) -> None:
         """The summary line: how an operation ended, one line per entry that failed."""
@@ -1134,6 +1156,9 @@ class MainWindow(QMainWindow):
         """Actions follow the active pane, the Session, the capabilities and the selection,
         and are greyed while one operation runs."""
         self._actions.refresh()
+        if self.compare_active():  # the Compare view has its own buttons: no pane to act on
+            for key in COMPARE_GREYED:
+                self._actions.action(key).setEnabled(False)
         self._send_button.setEnabled(self._actions.action("send").isEnabled())
         self._receive_button.setEnabled(self._actions.action("receive").isEnabled())
         self._actions.action("show_hidden").setChecked(self._settings.show_hidden)
