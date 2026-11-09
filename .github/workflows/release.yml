@@ -1,6 +1,8 @@
 name: Release
 
 # Runs when a GitHub Release is published, or by hand (artifacts only, nothing attached).
+# Each build job smoke-tests its file and uploads it as a workflow artifact. The release
+# gets the files only if both jobs succeed (job "publish"), so it is never half-published.
 on:
   release:
     types: [published]
@@ -9,8 +11,6 @@ on:
 jobs:
   linux:
     runs-on: ubuntu-22.04
-    permissions:
-      contents: write  # attach the file to the release
     steps:
       - uses: actions/checkout@v4
 
@@ -33,17 +33,61 @@ jobs:
       - name: Smoke test
         run: packaging/smoke-test.sh dist/nexplorer-v*-linux-x86_64.AppImage
 
-      - name: Upload as a workflow artifact
-        if: github.event_name == 'workflow_dispatch'
-        uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v4
         with:
           name: nexplorer-linux-x86_64
           path: dist/nexplorer-v*-linux-x86_64.AppImage
           if-no-files-found: error
 
-      - name: Attach to the release
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Check the release tag against the project version
         if: github.event_name == 'release'
+        shell: bash
+        env:
+          TAG: ${{ github.event.release.tag_name }}
+        run: python packaging/check_release_tag.py "$TAG"
+
+      - name: Build the zip
+        shell: pwsh
+        run: packaging/build-windows.ps1
+
+      - name: Unpack the zip
+        shell: pwsh
+        run: Expand-Archive dist/nexplorer-v*-windows-x64.zip -DestinationPath unpacked
+
+      - name: Smoke test the unpacked program
+        shell: bash
+        run: packaging/smoke-test.sh unpacked/nexplorer-v*/nexplorer.exe
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: nexplorer-windows-x64
+          path: dist/nexplorer-v*-windows-x64.zip
+          if-no-files-found: error
+
+  publish:
+    if: github.event_name == 'release'
+    needs: [linux, windows]
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write  # attach the files to the release
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: files
+          merge-multiple: true
+
+      - name: Attach to the release
         env:
           GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
           TAG: ${{ github.event.release.tag_name }}
-        run: gh release upload "$TAG" dist/nexplorer-v*-linux-x86_64.AppImage
+        run: gh release upload "$TAG" files/*
