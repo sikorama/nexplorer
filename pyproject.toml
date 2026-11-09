@@ -9,7 +9,7 @@ description = "Minimal desktop file manager for a ZX Spectrum Next, over Wi-Fi v
 readme = "README.md"
 license = { text = "MIT" }
 requires-python = ">=3.10"
-dependencies = ["PySide6", "send2trash"]
+dependencies = ["PySide6-Essentials", "send2trash"]
 
 [project.optional-dependencies]
 dev = ["pytest"]
