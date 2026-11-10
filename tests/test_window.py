@@ -7,7 +7,7 @@ import pytest
 from PySide6.QtWidgets import QApplication
 
 from nexplorer.protocol import Listener
-from nexplorer.ui.main_window import MainWindow
+from nexplorer.ui.main_window import DeleteAnswer, MainWindow
 from tests.conftest import dispose
 from tests.fake_next import FakeNext
 
@@ -567,6 +567,22 @@ def test_declining_the_delete_confirmation_deletes_nothing(app, window):
     assert not w.operation_running()
     pump(app, lambda: False, timeout=0.2)
     assert "c:/games/manic.tap" in nxt.fs and pane.names() == ["games", "readme.txt"]
+    nxt.drop()
+
+
+def test_stop_asking_answer_skips_the_delete_confirmation_on_the_next_too(app, window):
+    w, listener = window
+    nxt = connect_next(app, w, listener)
+    pane = w.next_pane()
+    assert pump(app, lambda: "games" in pane.names())
+    pane.select(["games"])
+    w.prompts.confirm = DeleteAnswer.DELETE_AND_STOP_ASKING
+    w.delete_selected()
+    assert pump(app, lambda: pane.names() == ["readme.txt"], timeout=5)
+    pane.select(["readme.txt"])
+    w.delete_selected()
+    assert pump(app, lambda: pane.names() == [], timeout=5)
+    assert len(w.prompts.confirmations) == 1
     nxt.drop()
 
 

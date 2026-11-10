@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 from PySide6.QtCore import QPoint
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QPushButton
 
 from nexplorer import i18n
 from nexplorer.protocol import Listener
@@ -165,11 +165,9 @@ def test_the_waiting_card_shows_addresses_command_and_config_reminder(app):
         assert "192.168.1.20" in text and ".sync5 -l" in text and "nextsync.cfg" in text
 
 
-def test_the_copy_button_puts_the_command_on_the_clipboard(app):
+def test_the_waiting_card_has_no_button(app):
     with opened(app) as (w, _):
-        QApplication.clipboard().setText("")
-        w.click_copy_command()
-        assert QApplication.clipboard().text() == ".sync5 -l"
+        assert w.waiting_card().findChildren(QPushButton) == []
 
 
 def test_the_next_toolbar_is_greyed_while_waiting_and_not_hidden(app, folders):

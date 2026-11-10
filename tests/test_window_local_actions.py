@@ -13,7 +13,7 @@ from PySide6.QtWidgets import QApplication
 from nexplorer import local_ops
 from nexplorer.protocol import Listener
 from nexplorer.settings import Settings, save
-from nexplorer.ui.main_window import MainWindow
+from nexplorer.ui.main_window import DeleteAnswer, MainWindow
 from tests.conftest import dispose, pump
 from tests.fake_next import FakeNext
 from tests.test_window import FS, Prompts
@@ -131,6 +131,33 @@ def test_delete_asks_in_terms_of_the_trash_with_cancel_as_the_safe_answer_then_t
     assert pump(app, lambda: w.local_pane().names() == ["dest"])
     assert sorted(os.path.basename(p) for p in w.trash.sent) == ["a.txt", "b.txt"]
     assert w.permanent.asked == []
+
+
+def test_stop_asking_answer_skips_the_delete_confirmation_for_the_rest_of_the_session(app, window):
+    w, _ = window
+    w.local_pane().select(["a.txt"])
+    w.prompts.confirm = DeleteAnswer.DELETE_AND_STOP_ASKING
+    w.trigger_menu("File", "Delete")
+    assert pump(app, lambda: "a.txt" not in w.local_pane().names())
+    idle(app, w)
+    w.local_pane().select(["b.txt"])
+    w.trigger_menu("File", "Delete")
+    assert pump(app, lambda: "b.txt" not in w.local_pane().names())
+    assert len(w.prompts.confirmations) == 1
+
+
+def test_a_plain_yes_or_a_cancel_keeps_asking(app, window):
+    w, _ = window
+    w.local_pane().select(["a.txt"])
+    w.prompts.confirm = False
+    w.trigger_menu("File", "Delete")
+    w.prompts.confirm = True
+    w.trigger_menu("File", "Delete")
+    assert pump(app, lambda: "a.txt" not in w.local_pane().names())
+    idle(app, w)
+    w.local_pane().select(["b.txt"])
+    w.trigger_menu("File", "Delete")
+    assert len(w.prompts.confirmations) == 3
 
 
 def test_when_the_trash_fails_permanent_deletion_is_offered_and_cancel_keeps_everything(app, window):

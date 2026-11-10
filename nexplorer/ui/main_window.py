@@ -4,6 +4,7 @@ import base64
 import os
 import threading
 from dataclasses import dataclass, replace
+from enum import Enum
 from pathlib import Path
 from typing import Callable
 
@@ -87,11 +88,25 @@ def _ask_name_dialog(title: str, initial: str = "") -> str | None:
     return text if accepted else None
 
 
-def _confirm_delete_dialog(message: str) -> bool:
-    answer = QMessageBox.warning(
-        None, tr("Delete"), message, QMessageBox.Yes | QMessageBox.Cancel, QMessageBox.Cancel
-    )
-    return answer == QMessageBox.Yes
+class DeleteAnswer(Enum):
+    """What the user answered to the delete confirmation. Truthy unless cancelled."""
+
+    CANCEL = 0
+    DELETE = 1
+    DELETE_AND_STOP_ASKING = 2
+
+    def __bool__(self) -> bool:
+        return self is not DeleteAnswer.CANCEL
+
+
+def _confirm_delete_dialog(message: str) -> DeleteAnswer:
+    box = QMessageBox(QMessageBox.Warning, tr("Delete"), message, QMessageBox.Yes | QMessageBox.Cancel)
+    box.setDefaultButton(QMessageBox.Cancel)
+    stop_asking = QCheckBox(tr("Do not ask again"))
+    box.setCheckBox(stop_asking)
+    if box.exec() != QMessageBox.Yes:
+        return DeleteAnswer.CANCEL
+    return DeleteAnswer.DELETE_AND_STOP_ASKING if stop_asking.isChecked() else DeleteAnswer.DELETE
 
 
 def _confirm_permanent_dialog(message: str) -> bool:
@@ -210,7 +225,7 @@ class MainWindow(QMainWindow):
         listener: Listener,
         local_addresses: Callable[[], list[tuple[str, str]]] = local_ipv4_addresses,
         ask_name: Callable[[str, str], str | None] = _ask_name_dialog,
-        confirm_delete: Callable[[str], bool] = _confirm_delete_dialog,
+        confirm_delete: Callable[[str], DeleteAnswer | bool] = _confirm_delete_dialog,
         confirm_overwrite: Callable[[str, int], tuple[str, bool]] = _confirm_overwrite_dialog,
         settings_path: Path | None = None,
         ask_settings: Callable[[Settings], Settings | None] = _settings_dialog,
@@ -234,6 +249,7 @@ class MainWindow(QMainWindow):
         self._ask_settings = ask_settings
         self._ask_name, self._confirm_delete = ask_name, confirm_delete
         self._confirm_overwrite = confirm_overwrite
+        self._delete_confirmation_off = False  # until the application is restarted
         self._after_check: Callable | None = None
         self.setWindowTitle("nexplorer")
         self._local_addresses = local_addresses
@@ -574,12 +590,9 @@ class MainWindow(QMainWindow):
         self._card_command = QLabel(SYNC_COMMAND)
         self._card_command.setStyleSheet("font-family: monospace")
         self._card_command.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        self._copy_button = QPushButton(tr("Copy"))
-        self._copy_button.clicked.connect(lambda: QApplication.clipboard().setText(SYNC_COMMAND))
         command_row = QHBoxLayout()
         command_row.addStretch(1)
         command_row.addWidget(self._card_command)
-        command_row.addWidget(self._copy_button)
         command_row.addStretch(1)
         reminder = QLabel(tr("The Local address must match the one in") + f" {CONFIG_FILE}")
         reminder.setWordWrap(True)
@@ -837,6 +850,15 @@ class MainWindow(QMainWindow):
         self._summary.setText(f"{tr('Invalid name')}: {name}")
         return False
 
+    def _delete_confirmed(self, message: str) -> bool:
+        """Ask for the delete confirmation, unless the user turned it off for this session."""
+        if self._delete_confirmation_off:
+            return True
+        answer = self._confirm_delete(message)
+        if answer is DeleteAnswer.DELETE_AND_STOP_ASKING:
+            self._delete_confirmation_off = True
+        return bool(answer)
+
     def delete_selected(self) -> None:
         """Delete the selected Next entries, folders with their content, once confirmed."""
         session, folder = self._next_pane.session(), self._next_pane.path()
@@ -847,7 +869,7 @@ class MainWindow(QMainWindow):
             f"{tr('Delete')} {len(entries)} {tr('items')} {tr('from the ZX Spectrum Next')}, {tr('starting with')} \u00ab{entries[0].name}\u00bb?\n"
             + tr("The deletion is permanent: the ZX Spectrum Next has no trash.")
         )
-        if self._confirm_delete(message):
+        if self._delete_confirmed(message):
             self._run(lambda progress, cancel: remove(session, folder, entries, progress, cancel))
 
     # -- changes on Local (the operations live in `local_ops`)
@@ -922,7 +944,7 @@ class MainWindow(QMainWindow):
             f"{tr('Delete')} {len(names)} {tr('items')} {tr('to the trash')}, "
             f"{tr('starting with')} \u00ab{names[0]}\u00bb?"
         )
-        if not self._confirm_delete(message):
+        if not self._delete_confirmed(message):
             return
 
         def trashed(outcome) -> None:
@@ -1230,8 +1252,8 @@ class MainWindow(QMainWindow):
     def waiting_card_text(self) -> str:
         return "\n".join(label.text() for label in self._card_labels)
 
-    def click_copy_command(self) -> None:
-        self._copy_button.click()
+    def waiting_card(self) -> QWidget:
+        return self._card
 
     def connection_text(self) -> str:
         return self._connection.text()
