@@ -94,7 +94,7 @@ You also can send `.sync <PC IP>` command.
 
 ### 5. Optional: launch the dot from the file browser
 
-To avoid typing the command, copy `wrap-sync` NextBASIC program to the Next. It runs `.sync5 -l` for you when you select it from the browser. The programs are listed in [examples/README.md](examples/README.md).
+To avoid typing the command, copy `sync-wrap` NextBASIC program to the Next. It runs `.sync5 -l` for you when you select it from the browser. The programs are listed in [examples/README.md](examples/README.md).
 
 ## Documentation
 

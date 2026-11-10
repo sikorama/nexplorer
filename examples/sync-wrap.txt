@@ -1,0 +1,131 @@
+10 REM sync-wrap
+20 LET mo=0:LET sp=0:LET fc=1:LET tr=0:LET an=1:LET rt=1:LET dr=1
+30 REM load syncwrap.cfg: any problem keeps the defaults
+40 ON ERROR GO TO 130
+50 OPEN #5,"syncwrap.cfg"
+60 INPUT #5;LINE a$:INPUT #5;LINE b$:INPUT #5;LINE c$:INPUT #5;LINE d$
+70 INPUT #5;LINE e$:INPUT #5;LINE f$:INPUT #5;LINE g$
+80 CLOSE #5
+90 LET m=VAL a$:LET s=VAL b$:LET f=VAL c$:LET t=VAL d$:LET n=VAL e$:LET r=VAL f$:LET d=VAL g$
+100 IF m<>INT m OR s<>INT s OR f<>INT f OR t<>INT t OR n<>INT n OR r<>INT r OR d<>INT d THEN GO TO 140
+110 IF m<0 OR m>1 OR s<0 OR s>2 OR f<0 OR f>1 OR t<0 OR t>1 OR n<0 OR n>1 OR r<0 OR r>1 OR d<0 OR d>2 THEN GO TO 140
+120 LET mo=m:LET sp=s:LET fc=f:LET tr=t:LET an=n:LET rt=r:LET dr=d:ON ERROR :GO TO 150
+130 ON ERROR GO TO 140:CLOSE #5
+140 ON ERROR :LET mo=0:LET sp=0:LET fc=1:LET tr=0:LET an=1:LET rt=1:LET dr=1
+150 REM read the Server address saved by .sync5, char by char:
+151 REM the file has no end of line, so INPUT LINE would fail at its end
+160 LET ad$="":LET e=0:LET l=0:ON ERROR GO TO 190
+170 OPEN #5,"c:/sys/config/nextsync.cfg"
+175 LET k$=INKEY$ #5:IF CODE k$<33 THEN GO TO 180
+176 LET ad$=ad$+k$:IF LEN ad$<60 THEN GO TO 175
+180 CLOSE #5:ON ERROR :GO TO 200
+190 ERROR TO e,l,x:ON ERROR GO TO 195:CLOSE #5
+195 ON ERROR :GO TO 200
+200 GO SUB 1000
+205 REM key loop: the screen is redrawn line by line, never in full
+210 PAUSE 0:LET k=CODE INKEY$:IF k>96 THEN LET k=k-32
+220 IF k=77 THEN LET mo=1-mo:GO SUB 410:GO SUB 620:GO TO 310
+230 IF k=83 THEN LET sp=sp+1:GO SUB 420:GO SUB 620:GO TO 310
+240 IF k=70 THEN LET fc=1-fc:GO SUB 430:GO SUB 620:GO TO 310
+250 IF k=84 THEN LET tr=1-tr:GO SUB 440:GO SUB 620:GO TO 310
+260 IF k=78 THEN LET an=1-an:GO SUB 450:GO SUB 620:GO TO 310
+270 IF k=82 THEN LET rt=1-rt:GO SUB 455:GO SUB 620:GO TO 310
+280 IF k=68 THEN LET dr=dr+1:GO SUB 460:GO SUB 620:GO TO 310
+285 IF k=65 THEN GO TO 800
+286 IF k=13 THEN GO TO 700
+290 IF k=88 THEN GO TO 990
+300 GO TO 210
+310 REM save syncwrap.cfg: a failed write is ignored
+320 ON ERROR GO TO 350
+330 OPEN #4,"o>syncwrap.cfg":PRINT #4;mo:PRINT #4;sp:PRINT #4;fc:PRINT #4;tr:PRINT #4;an:PRINT #4;rt:PRINT #4;dr
+340 CLOSE #4:ON ERROR :GO TO 210
+350 ON ERROR GO TO 360:CLOSE #4
+360 ON ERROR :GO TO 210
+400 REM value lines, each padded to wipe the previous value
+410 LET m$="Listen ":IF mo=1 THEN LET m$="Sync   "
+415 PRINT AT 4,13;m$:RETURN
+420 IF sp>2 THEN LET sp=0
+421 LET s$="default":IF sp=1 THEN LET s$="slow   "
+422 IF sp=2 THEN LET s$="fast   "
+423 PRINT AT 5,13;s$:RETURN
+430 LET f$="on ":IF fc=0 THEN LET f$="off"
+431 PRINT AT 6,13;f$:RETURN
+440 LET t$="on ":IF tr=0 THEN LET t$="off"
+441 PRINT AT 7,13;t$:RETURN
+450 LET n$="on ":IF an=0 THEN LET n$="off"
+451 PRINT AT 8,13;n$:RETURN
+455 LET r$="on ":IF rt=0 THEN LET r$="off"
+456 PRINT AT 9,13;r$:RETURN
+460 IF dr>2 THEN LET dr=0
+461 LET d$="C: ":IF dr=1 THEN LET d$="D: "
+462 IF dr=2 THEN LET d$="none"
+463 PRINT AT 10,13;d$:RETURN
+470 LET p$="not set":IF LEN ad$>0 THEN LET p$=ad$
+471 LET p$=p$+"                           ":PRINT AT 3,4;p$( TO 27):RETURN
+600 REM build the option string in c$
+601 LET c$=""
+602 IF mo=0 THEN LET o$="-L":GO SUB 650
+603 IF mo=0 AND tr=0 THEN LET o$="-nv":GO SUB 650
+604 IF sp=1 THEN LET o$="-s":GO SUB 650
+605 IF sp=2 THEN LET o$="-f":GO SUB 650
+606 IF fc=0 THEN LET o$="-nfc":GO SUB 650
+607 IF an=0 THEN LET o$="-na":GO SUB 650
+608 IF rt=0 THEN LET o$="-nr":GO SUB 650
+609 RETURN
+620 REM show the command that ENTER will launch
+621 GO SUB 600
+622 LET p$="":IF mo=0 AND dr=0 THEN LET p$=".cd "+CHR$ 34+"C:"+CHR$ 34
+623 IF mo=0 AND dr=1 THEN LET p$=".cd "+CHR$ 34+"D:"+CHR$ 34
+624 LET p$=p$+"                                ":PRINT AT 16,0;p$( TO 32)
+625 LET p$=".sync5 "+c$+"                                ":PRINT AT 17,0;p$( TO 32):RETURN
+650 REM append option o$ to c$
+651 IF LEN c$>0 THEN LET c$=c$+" "
+652 LET c$=c$+o$:RETURN
+700 REM Launch: check the dot first
+710 CLS:ON ERROR GO TO 790
+720 OPEN #6,"c:/dot/sync5":CLOSE #6:ON ERROR
+730 GO SUB 600
+740 REM Drive, Listen mode only
+741 IF mo=1 OR dr=2 THEN GO TO 770
+742 IF dr=1 THEN GO TO 760
+750 .cd "C:"
+755 GO TO 770
+760 .cd "D:"
+770 POKE 23692,255
+775 .$ sync5 c$
+780 POKE 23692,255:GO TO 200
+790 ON ERROR :PRINT "sync5 not found in c:/dot":PRINT "Press a key":PAUSE 0:GO TO 200
+800 CLS:PRINT "Server address"
+810 PRINT "Current:"
+820 IF LEN ad$=0 THEN PRINT "not set"
+830 IF LEN ad$>0 THEN PRINT ad$
+840 PRINT:PRINT "Not checked: type it right."
+850 INPUT "New: ";LINE na$
+860 IF LEN na$=0 THEN PRINT "Empty: refused":GO TO 920
+870 IF na$(1)="-" THEN PRINT "No leading dash":GO TO 920
+880 ON ERROR GO TO 910
+890 LET c$=na$
+895 .$ sync5 c$
+896 ON ERROR :GO TO 150
+910 ON ERROR :PRINT "Save failed"
+920 PRINT "Press a key":PAUSE 0:GO TO 200
+990 CLS:GO TO 9999
+1000 REM draw the whole Summary screen once
+1010 CLS
+1020 PRINT AT 0,0;"sync-wrap"
+1030 PRINT AT 2,0;"[A] Address"
+1040 PRINT AT 4,0;"[M] Mode:"
+1050 PRINT AT 5,0;"[S] Speed:"
+1060 PRINT AT 6,0;"[F] Flow:"
+1070 PRINT AT 7,0;"[T] Trace:"
+1080 PRINT AT 8,0;"[N] Anim:"
+1090 PRINT AT 9,0;"[R] Retro:"
+1100 PRINT AT 10,0;"[D] Drive:"
+1110 PRINT AT 12,0;"ENTER  Launch"
+1120 PRINT AT 13,0;"[X]    Exit"
+1130 PRINT AT 15,0;"Command:"
+1140 GO SUB 470:GO SUB 410:GO SUB 420:GO SUB 430:GO SUB 440:GO SUB 450:GO SUB 455:GO SUB 460
+1150 GO SUB 620
+1160 PRINT AT 20,0;"DEBUG len ";LEN ad$;" err ";e;" line ";l
+1170 RETURN
+9999 REM end
