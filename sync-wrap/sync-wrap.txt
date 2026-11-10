@@ -12,14 +12,15 @@
 120 LET mo=m:LET sp=s:LET fc=f:LET tr=t:LET an=n:LET rt=r:LET dr=d:ON ERROR :GO TO 150
 130 ON ERROR GO TO 140:CLOSE #5
 140 ON ERROR :LET mo=0:LET sp=0:LET fc=1:LET tr=0:LET an=1:LET rt=1:LET dr=1
-150 REM read the Server address saved by .sync5, char by char:
-151 REM the file has no end of line, so INPUT LINE would fail at its end
-160 LET ad$="":LET e=0:LET l=0:ON ERROR GO TO 190
-170 OPEN #5,"c:/sys/config/nextsync.cfg"
-175 LET k$=INKEY$ #5:IF CODE k$<33 THEN GO TO 180
-176 LET ad$=ad$+k$:IF LEN ad$<60 THEN GO TO 175
-180 CLOSE #5:ON ERROR :GO TO 200
-190 ERROR TO e,l,x:ON ERROR GO TO 195:CLOSE #5
+150 REM read the Server address saved by .sync5: no end of line in the file, so read DIM bytes
+160 LET ad$="":ON ERROR GO TO 190
+170 CLOSE #7:OPEN #7,"c:/sys/config/nextsync.cfg"
+175 DIM #7 TO n:IF n>60 THEN LET n=60
+176 IF n<1 THEN GO TO 180
+177 FOR i=1 TO n:NEXT #7 TO b:IF b>32 THEN LET ad$=ad$+CHR$ b
+178 NEXT i
+180 CLOSE #7:ON ERROR :GO TO 200
+190 ON ERROR GO TO 195:CLOSE #7
 195 ON ERROR :GO TO 200
 200 GO SUB 1000
 205 REM key loop: the screen is redrawn line by line, never in full
@@ -126,6 +127,5 @@
 1130 PRINT AT 15,0;"Command:"
 1140 GO SUB 470:GO SUB 410:GO SUB 420:GO SUB 430:GO SUB 440:GO SUB 450:GO SUB 455:GO SUB 460
 1150 GO SUB 620
-1160 PRINT AT 20,0;"DEBUG len ";LEN ad$;" err ";e;" line ";l
 1170 RETURN
 9999 REM end
