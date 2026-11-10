@@ -68,7 +68,7 @@ def test_the_menu_bar_has_five_menus_with_their_entries_and_shortcuts(app, windo
     expected = {
         "File": [("New folder", "Ctrl+Shift+N"), ("Rename", "F2"), ("Delete", "Del"), ("Settings", ""), ("Quit", "Ctrl+Q")],
         "Edit": [("Copy", "Ctrl+C"), ("Cut", "Ctrl+X"), ("Paste", "Ctrl+V"), ("Select all", "Ctrl+A")],
-        "Transfer": [("Send", ""), ("Receive", ""), ("Compare", ""), ("Disconnect", "")],
+        "Transfer": [("Send", ""), ("Receive", ""), ("Send sync-wrap.bas to the ZX Spectrum Next", ""), ("Compare", ""), ("Disconnect", "")],
         "View": [("Show hidden files", ""), ("Sort by", ""), ("Refresh", "Ctrl+R")],
         "Help": [("About", "")],
     }

@@ -54,6 +54,8 @@ nexplorer listens on TCP port 2048 from the moment it starts. Until a Next conne
 
 To run the tests: `pip install -e .[dev]` then `pytest`.
 
+On Linux and macOS a `Makefile` wraps these steps: `make run` (creates `.venv` if needed, then starts nexplorer), `make test`, `make clean` (removes `build/`, `dist/`, caches and `*.egg-info`) and `make mrproper` (`clean`, plus `.venv`). Pass arguments with `ARGS=...`.
+
 ## Connect a Next
 
 1. Start nexplorer on the PC and note the Local address shown in the Next pane.
@@ -94,7 +96,7 @@ You also can send `.sync <PC IP>` command.
 
 ### 5. Optional: launch the dot from the file browser
 
-To avoid typing the command, copy `sync-wrap` NextBASIC program to the Next. It runs `.sync5 -l` for you when you select it from the browser. The programs are listed in [examples/README.md](examples/README.md).
+To avoid typing the command, put the `sync-wrap.bas` NextBASIC program on the Next. It runs `.sync5 -l` for you when you select it from the browser, and its Drive option can start the dot from the D: drive, which is the one the Next pane needs to browse D:. Once a Next is connected, **Transfer > Send sync-wrap.bas to the ZX Spectrum Next** sends it into the Next folder shown. See [sync-wrap/README.md](sync-wrap/README.md).
 
 ## Documentation
 

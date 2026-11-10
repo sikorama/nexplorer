@@ -165,6 +165,12 @@ def test_the_waiting_card_shows_addresses_command_and_config_reminder(app):
         assert "192.168.1.20" in text and ".sync5 -l" in text and "nextsync.cfg" in text
 
 
+def test_the_waiting_card_advises_drive_d_and_sync_wrap(app):
+    with opened(app) as (w, _):
+        text = w.waiting_card_text()
+        assert "D:" in text and "sync-wrap.bas" in text
+
+
 def test_the_waiting_card_has_no_button(app):
     with opened(app) as (w, _):
         assert w.waiting_card().findChildren(QPushButton) == []

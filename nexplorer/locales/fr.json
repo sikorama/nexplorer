@@ -58,6 +58,8 @@
   "No ZX Spectrum Next connected": "Aucun ZX Spectrum Next connecté",
   "On the ZX Spectrum Next, run:": "Sur le ZX Spectrum Next, lancer :",
   "The deletion is permanent: the ZX Spectrum Next has no trash.": "La suppression est définitive : le ZX Spectrum Next n'a pas de corbeille.",
+  "Better run it from the D: drive, with sync-wrap.bas (see the sync-wrap folder).": "Mieux vaut le lancer depuis le lecteur D:, avec sync-wrap.bas (voir le dossier sync-wrap).",
+  "Send sync-wrap.bas to the ZX Spectrum Next": "Envoyer sync-wrap.bas vers le ZX Spectrum Next",
   "Waiting for a ZX Spectrum Next": "En attente d'un ZX Spectrum Next",
   "Only on the ZX Spectrum Next": "Seulement sur le ZX Spectrum Next",
   "ZX Spectrum Next": "ZX Spectrum Next",

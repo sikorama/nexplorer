@@ -10,6 +10,8 @@ a = Analysis(
     datas=[
         (str(root / "nexplorer" / "locales"), "nexplorer/locales"),
         (str(root / "nexplorer" / "ui" / "svg"), "nexplorer/ui/svg"),
+        # The program the "Send sync-wrap.bas" menu entry sends; PyInstaller fails the build if the folder is missing.
+        (str(root / "sync-wrap" / "sync-wrap.bas"), "sync-wrap"),
     ],
     hiddenimports=["send2trash"],  # imported lazily, at call time
 )

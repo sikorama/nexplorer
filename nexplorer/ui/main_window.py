@@ -34,7 +34,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from nexplorer import local_ops, overwrite
+from nexplorer import local_ops, overwrite, sync_wrap
 from nexplorer import settings as settings_store
 from nexplorer.capabilities import MINIMUM_DOT, Capabilities, capabilities
 from nexplorer.i18n import available_languages, set_language, tr
@@ -234,8 +234,10 @@ class MainWindow(QMainWindow):
         trash: Trash = system_trash,
         confirm_permanent: Callable[[str], bool] = _confirm_permanent_dialog,
         color_scheme: Callable[[], Qt.ColorScheme] = theme.system_scheme,
+        sync_wrap_path: Callable[[], Path | None] = sync_wrap.locate,
     ):
         super().__init__()
+        self._sync_wrap_path = sync_wrap_path
         self._color_scheme = color_scheme
         self._theme_name = "light"
         self._address = ""
@@ -433,6 +435,11 @@ class MainWindow(QMainWindow):
             next=Binding(lambda: idle() and selected() >= 1, self.receive_selected),
         )
         self.addAction(a.action("transfer"))
+        a.define(
+            "send_sync_wrap",
+            tr("Send sync-wrap.bas to the ZX Spectrum Next"),
+            both=Binding(lambda: idle() and self._sync_wrap_path() is not None, self.send_sync_wrap),
+        )
         a.define("compare", tr("Compare"), both=Binding(idle, self.compare))
         a.define(
             "disconnect",
@@ -474,7 +481,7 @@ class MainWindow(QMainWindow):
         for title, keys in (
             (tr("File"), ["new_folder", "rename", "delete", "settings", "quit"]),
             (tr("Edit"), ["copy", "cut", "paste", "select_all"]),
-            (tr("Transfer"), ["send", "receive", "compare", "disconnect"]),
+            (tr("Transfer"), ["send", "receive", "send_sync_wrap", "compare", "disconnect"]),
             (tr("View"), ["show_hidden", "sort", "refresh"]),
             (tr("Help"), ["about"]),
         ):
@@ -597,11 +604,15 @@ class MainWindow(QMainWindow):
         reminder = QLabel(tr("The Local address must match the one in") + f" {CONFIG_FILE}")
         reminder.setWordWrap(True)
         reminder.setAlignment(Qt.AlignCenter)
-        self._card_labels = [title, self._card_addresses, run, self._card_command, reminder]
+        advice = QLabel(tr("Better run it from the D: drive, with sync-wrap.bas (see the sync-wrap folder)."))
+        advice.setWordWrap(True)
+        advice.setAlignment(Qt.AlignCenter)
+        self._card_labels = [title, self._card_addresses, run, self._card_command, advice, reminder]
         inner = QVBoxLayout(card)
         for widget in (icon, title, self._card_addresses, run):
             inner.addWidget(widget)
         inner.addLayout(command_row)
+        inner.addWidget(advice)
         inner.addWidget(reminder)
         outer = QWidget()
         centred = QVBoxLayout(outer)
@@ -678,6 +689,12 @@ class MainWindow(QMainWindow):
         folder = self._next_pane.path()
         if session and paths and folder:
             self._send_checked(session, paths, folder)
+
+    def send_sync_wrap(self) -> None:
+        """Send the shipped sync-wrap.bas to the Next folder shown."""
+        session, folder, program = self._next_pane.session(), self._next_pane.path(), self._sync_wrap_path()
+        if session and folder and program and not self._busy:
+            self._send_checked(session, [str(program)], folder)
 
     def send_file(self, name: str) -> None:
         """Double-click on a Local file: send it to the Next folder shown."""

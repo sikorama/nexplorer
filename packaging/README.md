@@ -1,6 +1,6 @@
 # Packaging
 
-Builds a portable zip for Windows (x64) and an AppImage for Linux (x86_64) with PyInstaller in directory mode. `nexplorer.spec` declares the data files (locales, SVG icons) and the lazily imported `send2trash`. `icon.png` and `icon.ico` are the application icon; replacing them changes no script (`make-icon.sh` regenerates them from an embedded SVG).
+Builds a portable zip for Windows (x64) and an AppImage for Linux (x86_64) with PyInstaller in directory mode. `nexplorer.spec` declares the data files (locales, SVG icons, `sync-wrap/sync-wrap.bas`, which the build fails without) and the lazily imported `send2trash`. `icon.png` and `icon.ico` are the application icon; replacing them changes no script (`make-icon.sh` regenerates them from an embedded SVG).
 
 ## Build locally
 
