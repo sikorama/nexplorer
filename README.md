@@ -74,11 +74,11 @@ The Next pane switches to the Next's SD card when the connection is made. Use **
 
 ### 1. Configure Wi-Fi
 
-Use the Next's own Wi-Fi setup so that the Next joins the same network as your PC (the same router). Follow the official Next documentation for your core version and check that the Next gets an address on that network.
+Use the Next's own Wi-Fi setup so that the Next joins the same network as your PC (the same router). Follow the official Next documentation for your core version and check that the Next gets an address on that network. Wifi configurator app is located in `C:/APPS/WIFI/SETUP`)
 
 ### 2. Install the `.sync5` dot command
 
-Install it with `gettit`, the Next's package manager. If `gettit` is not installed yet, install it first (you can install `gettit2` at the same time if you do not have it). Then search for `sync5` in `gettit` and install it. The dot command is a file named `.sync5`; once installed it lives in the `DOT` folder at the root of the SD card.
+Install it with `gettit`, a really nice aplicattion downloader (it's preinstalled in C:/APPS/GETTIT). If `gettit` is not installed yet, install it first (you can install `gettit2` at the same time if you do not have it). Then search for `sync5` in `gettit` and install it. The dot command is a file named `sync5`; once installed it lives in the `DOT` folder at the root of the SD card. Move it usingf Browser app if needed ('v' key then 'p' in C:/DOT)
 
 ### 3. Place the file in `c:/DOT`
 
@@ -86,14 +86,15 @@ If the installer put the sync file somewhere else, move it to `c:/DOT`. Dot comm
 
 ### 4. Point the Next at your PC and connect
 
-Edit `c:/sys/config/nextsync.cfg` on the Next so that it contains the PC's address, the Local address shown by nexplorer. Then:
+Edit `C:/sys/config/nextsync.cfg` on the Next so that it contains the PC's address, the Local address shown by nexplorer. Then:
+You also can send `.sync <PC IP>` command.
 
 1. Run nexplorer on the PC.
 2. Run `.sync5 -l` on the Next.
 
 ### 5. Optional: launch the dot from the file browser
 
-To avoid typing the command, copy the owner's `wrap-sync` NextBASIC program to the Next. It runs `.sync5 -l` for you when you select it from the browser. The programs are listed in [examples/README.md](examples/README.md).
+To avoid typing the command, copy `wrap-sync` NextBASIC program to the Next. It runs `.sync5 -l` for you when you select it from the browser. The programs are listed in [examples/README.md](examples/README.md).
 
 ## Documentation
 
